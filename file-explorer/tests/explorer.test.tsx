@@ -218,7 +218,7 @@ test('draws Nerd Font icons in colour when configured', { options: { icons: 'ner
 })
 
 test('previews markdown rendered and follows its relative links', async ($, on) => {
-  const readme = '# App\n\nSee [main](./src/main.ts) and [site](https://example.com).\n'
+  const readme = '# App\n\nSee [main](./src/main.ts) and [site](https://example.com).\n\n```ts\n# not a heading\nconst a = 1\n```\n'
   on('session.start', async (_$, e) => ({ cwd: e.cwd }))
   on('command.register', async (_$, e) => ({ value: { command: e.name } }))
   on('fs.list', async (_$, e) => ({
@@ -242,6 +242,13 @@ test('previews markdown rendered and follows its relative links', async ($, on) 
   const md = await ui.find({ type: 'Markdown' })
   expect(md?.props.text).toBe('See [main](./src/main.ts) and [site](https://example.com).')
   expect(md?.props.pressableLinks).toEqual(['./src/main.ts'])
+
+  // Fenced code is framed, its language on the top edge, its body as code.
+  const frame = await ui.find({ key: 'code:2' })
+  expect(frame?.props.borderStyle).toBe('round')
+  expect(await ui.find({ type: 'Text', text: ' ts ' })).toBeDefined()
+  const block = (await ui.findAll({ type: 'Code' })).find(one => one.props.language === 'ts')
+  expect(block?.props.source).toBe('# not a heading\nconst a = 1\n')
 
   await ui.press({ key: 'mode:file' })
   expect(await ui.find({ type: 'Markdown' })).toBeUndefined()
