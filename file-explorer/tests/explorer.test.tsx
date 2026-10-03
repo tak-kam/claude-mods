@@ -170,7 +170,8 @@ test('splits into a tree and a preview when wide', async ($, on) => {
 
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
   const ui = await $.ui.mount(PANE('file-explorer', 120))
-  await ui.press({ key: 'row:README.md' })
+  await ui.press({ key: 'row:src' })
+  await ui.press({ key: 'row:src/util.ts' })
 
   // The file shows beside the tree, windowed to the pane's rows.
   const code = await ui.find({ type: 'Code' })
@@ -214,4 +215,38 @@ test('draws Nerd Font icons in colour when configured', { options: { icons: 'ner
   await ui.press({ key: 'row:src' })
   const ts = await ui.find({ type: 'Text', text: '\ue628 ' })
   expect(ts?.props.color).toBe('blue')
+})
+
+test('previews markdown rendered and follows its relative links', async ($, on) => {
+  const readme = '# App\n\nSee [main](./src/main.ts) and [site](https://example.com).\n'
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('fs.list', async (_$, e) => ({
+    value: (TREE[e.path] ?? []).map(one => ({ ...one, mtimeMs: 0, isLink: false })),
+  }))
+  on('fs.read', async (_$, e) => ({ value: e.path.endsWith('README.md') ? readme : 'export const answer = 42\n' }))
+  on('fs.stat', async (_$, e) => ({
+    value: { kind: e.path.endsWith('/src') ? ('dir' as const) : ('file' as const), size: 30, mtimeMs: 0, isLink: false },
+  }))
+  on('process.run', async (_$, e) => fakeGit(e.argv, []))
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+  on('ui.panes', async () => ({ value: [] }))
+
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE('file-explorer', 120))
+  await ui.press({ key: 'row:README.md' })
+
+  const md = await ui.find({ type: 'Markdown' })
+  expect(md?.props.text).toBe(readme.replace(/\n$/, ''))
+  expect(md?.props.pressableLinks).toEqual(['./src/main.ts'])
+
+  await ui.press({ key: 'mode:file' })
+  expect(await ui.find({ type: 'Markdown' })).toBeUndefined()
+  expect((await ui.find({ type: 'Code' }))?.props.path).toBe('README.md')
+  await ui.press({ key: 'mode:rendered' })
+
+  // A relative link opens the file and unfolds the tree down to it.
+  await ui.press({ key: 'md', link: { href: './src/main.ts' } })
+  expect((await ui.find({ type: 'Code' }))?.props.path).toBe('src/main.ts')
+  expect(await ui.find({ key: 'row:src/main.ts' })).toBeDefined()
 })

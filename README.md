@@ -45,6 +45,7 @@ claude --plugin-dir ./file-explorer
 - Files and folders carry icons by name and extension (📁 📂 📘 📝 🐍 …); folders also get a blue `▸`/`▾` and a trailing `/`
 - Icon style is the `icons` option in `/config`: `emoji` (default, any terminal), `nerd` (needs a Nerd Font; coloured like VS Code), or `ascii`
 - Explorer: `f` Files, `c` Changes, `h` History
+- Markdown files open rendered (`m` Preview, `o` Source); a relative link in the preview opens its file in the explorer
 - Preview: `o` / `d` file or diff, `j` / `k` scroll, `n` / `p` next or previous change, `q` quotes the mouse selection, `❝ quote` quotes a hunk, `@` inserts `@path`
 
 Opened at start, the pane docks beside the transcript in fullscreen mode at 144 columns or wider; `/files` opens it at any width.

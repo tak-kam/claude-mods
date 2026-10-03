@@ -6,6 +6,7 @@ import type {
   ExplorerChange,
   ExplorerCommit,
   ExplorerEntry,
+  ExplorerMode,
   ExplorerPreview,
   ExplorerView,
 } from '../types'
@@ -327,7 +328,12 @@ async function fileText($: EngineInterface, rel: string, size: number | undefine
   return { text: clean.slice(0, cut), note: 'preview cut at 10000 characters', isOnDisk: true }
 }
 
-async function showPath($: EngineInterface, rel: string, options: { mode?: 'file' | 'diff'; size?: number } = {}) {
+const isMarkdown = (rel: string) => /\.(md|mdx|markdown)$/i.test(rel)
+
+// What a file opens as from the tree: markdown rendered, the rest as source.
+const fileMode = (rel: string): ExplorerMode => (isMarkdown(rel) ? 'rendered' : 'file')
+
+async function showPath($: EngineInterface, rel: string, options: { mode?: ExplorerMode; size?: number } = {}) {
   await update($, selected, () => rel)
   const change = (await read($, changes)).find(one => one.path === rel)
   const isInRange = change !== undefined && (await read($, base)).head !== undefined
@@ -338,8 +344,9 @@ async function showPath($: EngineInterface, rel: string, options: { mode?: 'file
         ? { text: '', note: '', isOnDisk: false }
         : await fileText($, rel, options.size)
   const diff = change === undefined ? { diff: '', note: '' } : await diffOf($, change)
-  const wanted = options.mode ?? (change === undefined ? 'file' : 'diff')
-  const mode = change === undefined ? 'file' : file.isOnDisk ? wanted : 'diff'
+  const asked = options.mode ?? (change === undefined ? fileMode(rel) : 'diff')
+  const wanted = asked === 'rendered' && !isMarkdown(rel) ? 'file' : asked
+  const mode = change === undefined ? (wanted === 'diff' ? fileMode(rel) : wanted) : file.isOnDisk ? wanted : 'diff'
   const shown: ExplorerPreview = {
     path: rel,
     mode,
@@ -491,6 +498,103 @@ function folderBadges(list: ExplorerChange[]): Record<string, string> {
   return out
 }
 
+// Relative links of a markdown text: what a press may open in the explorer.
+function localLinks(text: string): string[] {
+  const found = new Set<string>()
+  for (const match of text.matchAll(/\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)/g)) {
+    const href = match[1] ?? ''
+    if (href !== '' && !href.startsWith('#') && !/^[a-z][a-z0-9+.-]*:/i.test(href)) found.add(href)
+    if (found.size >= 256) break
+  }
+  return [...found]
+}
+
+// A link's target relative to the root: from the file's folder, or from the
+// root for one starting with `/`; `..` above the root is refused.
+function resolveLink(from: string, href: string): string | undefined {
+  let path = href.split('#')[0] ?? ''
+  try {
+    path = decodeURI(path)
+  } catch {}
+  if (path === '') return undefined
+  const parts = path.startsWith('/') ? [] : parentOf(from).split('/').filter(Boolean)
+  for (const part of path.split('/')) {
+    if (part === '' || part === '.') continue
+    if (part === '..') {
+      if (parts.length === 0) return undefined
+      parts.pop()
+    } else parts.push(part)
+  }
+  return parts.join('/')
+}
+
+async function openLink($: EngineInterface, from: string, href: string) {
+  const rel = resolveLink(from, href)
+  if (rel === undefined) {
+    $.ui.toast(`Outside the project: ${href}`)
+    return
+  }
+  const dir = await read($, root)
+  const stat = await $.fs.stat(join(dir, rel)).catch(() => undefined)
+  if (stat === undefined) {
+    $.ui.toast(`Not found: ${rel}`)
+    return
+  }
+  // Open every folder down to it, so the tree shows where it is.
+  const folders: string[] = []
+  for (let up = stat.kind === 'dir' ? rel : parentOf(rel); up !== ''; up = parentOf(up)) folders.unshift(up)
+  for (const folder of folders) {
+    if (!(await read($, expanded)).includes(folder)) await toggleDir($, folder)
+  }
+  await update($, view, () => 'files' as const)
+  if (stat.kind === 'dir') {
+    await update($, selected, () => rel)
+    await reveal($, rel)
+  } else {
+    await showPath($, rel, { mode: fileMode(rel), size: stat.size })
+  }
+}
+
+// Lines `from` onward of a markdown text, as many as fit `room` rows at
+// `width`. A window starting inside a fenced block reopens the fence with
+// its opening line, and one ending inside closes it, so code stays code.
+function markdownWindow(lines: string[], from: number, room: number, width: number): { text: string; start: number; end: number } {
+  const opener: (string | undefined)[] = []
+  let fence = ''
+  let fenceLine: string | undefined
+  for (const line of lines) {
+    opener.push(fenceLine)
+    const mark = /^\s*(`{3,}|~{3,})/.exec(line)?.[1]
+    if (mark === undefined) continue
+    if (fence === '') {
+      fence = mark
+      fenceLine = line
+    } else if (mark.charAt(0) === fence.charAt(0) && mark.length >= fence.length) {
+      fence = ''
+      fenceLine = undefined
+    }
+  }
+  const start = clamp(from, 0, Math.max(0, lines.length - 1))
+  const reopen = opener[start]
+  let used = reopen === undefined ? 0 : 1
+  let end = start
+  while (end < lines.length) {
+    const line = lines[end] ?? ''
+    const cost = Math.max(1, Math.ceil(line.length / Math.max(10, width))) + (/^#{1,6}\s/.test(line) ? 1 : 0)
+    if (used + cost > room - 1 && end > start) break
+    used += cost
+    end++
+  }
+  const close = opener[end] ?? undefined
+  const body = lines.slice(start, end)
+  const text = [
+    ...(reopen === undefined ? [] : [reopen]),
+    ...body,
+    ...(close === undefined || end >= lines.length ? [] : [(/^\s*(`{3,}|~{3,})/.exec(close)?.[1] ?? '```')]),
+  ].join('\n')
+  return { text, start, end }
+}
+
 // ---- drawing -------------------------------------------------------------
 
 type Elements = ElementTable
@@ -608,7 +712,7 @@ async function drawSidebar(
               key={`row:${rel}`}
               label={fit(name, room)}
               plain
-              onPress={() => (entry.isDir ? toggleDir($, rel) : showPath($, rel, { mode: 'file', size: entry.size }))}
+              onPress={() => (entry.isDir ? toggleDir($, rel) : showPath($, rel, { mode: fileMode(rel), size: entry.size }))}
             />
             <Box flexGrow={1} />
             {mark !== '' && <Text color="blue">{mark}</Text>}
@@ -689,7 +793,7 @@ async function drawPreview(
   rows: number | undefined,
   isOwnPane: boolean,
 ): Promise<RenderElement> {
-  const { Box, Text, Button, Code } = els
+  const { Box, Text, Button, Code, Markdown } = els
   const shown = await read($, preview)
   if (shown === null) {
     return (
@@ -710,10 +814,12 @@ async function drawPreview(
 
   // Each hunk is a label row and its lines; the file is its lines.
   const hunks = shown.mode === 'diff' ? splitHunks(shown.diff) : []
-  const fileLines = shown.mode === 'file' && shown.text !== '' ? shown.text.replace(/\n$/, '').split('\n') : []
+  const isSource = shown.mode === 'file' || shown.mode === 'rendered'
+  const fileLines = isSource && shown.text !== '' ? shown.text.replace(/\n$/, '').split('\n') : []
   const hunkRows = hunks.map(hunk => hunk.body.replace(/\n$/, '').split('\n').length)
-  const total = shown.mode === 'file' ? fileLines.length : hunkRows.reduce((sum, n) => sum + n, 0)
-  const fixed = 1 + (shown.isChanged ? 1 : 0) + (shown.note !== '' ? 1 : 0)
+  const total = isSource ? fileLines.length : hunkRows.reduce((sum, n) => sum + n, 0)
+  const hasModes = shown.isChanged || isMarkdown(shown.path)
+  const fixed = 1 + (hasModes ? 1 : 0) + (shown.note !== '' ? 1 : 0)
   const room = rows === undefined ? total : Math.max(1, rows - fixed)
   layout.previewRows = room
   layout.previewTotal = total
@@ -726,6 +832,26 @@ async function drawPreview(
   const isOver = total > room
 
   const body: RenderElement[] = []
+  let shownEnd = Math.min(total, offset + room)
+  if (shown.mode === 'rendered' && fileLines.length > 0) {
+    const part = rows === undefined
+      ? { text: fileLines.join('\n'), start: 0, end: fileLines.length }
+      : markdownWindow(fileLines, offset, room, width)
+    shownEnd = part.end
+    const links = localLinks(part.text)
+    body.push(
+      links.length > 0 ? (
+        <Markdown
+          key="md"
+          text={part.text}
+          pressableLinks={links}
+          onLinkPress={link => openLink($, shown.path, link.href)}
+        />
+      ) : (
+        <Markdown key="md" text={part.text} />
+      ),
+    )
+  }
   if (shown.mode === 'file' && fileLines.length > 0) {
     body.push(
       <Code
@@ -788,24 +914,31 @@ async function drawPreview(
           )}
         </Box>
       </Box>
-      {shown.isChanged && (
+      {hasModes && (
         <Box flexDirection="row" gap={1}>
+          {shown.isOnDisk && isMarkdown(shown.path) && (
+            <Button key="mode:rendered" label="Preview" plain hotkey="m" dimColor={shown.mode === 'rendered' ? undefined : true}
+              onPress={() => showPath($, shown.path, { mode: 'rendered' })} />
+          )}
           {shown.isOnDisk && (
-            <Button key="mode:file" label="File" plain hotkey="o" dimColor={shown.mode === 'file' ? undefined : true}
+            <Button key="mode:file" label={isMarkdown(shown.path) ? 'Source' : 'File'} plain hotkey="o"
+              dimColor={shown.mode === 'file' ? undefined : true}
               onPress={() => showPath($, shown.path, { mode: 'file' })} />
           )}
-          <Button key="mode:diff" label="Diff" plain hotkey="d" dimColor={shown.mode === 'diff' ? undefined : true}
-            onPress={() => showPath($, shown.path, { mode: 'diff' })} />
+          {shown.isChanged && (
+            <Button key="mode:diff" label="Diff" plain hotkey="d" dimColor={shown.mode === 'diff' ? undefined : true}
+              onPress={() => showPath($, shown.path, { mode: 'diff' })} />
+          )}
           {change !== undefined && (
             <Text dimColor>
               <Text color={BADGE_COLOR[change.letter] ?? 'yellow'}>{change.letter}</Text>
               {` ${verb} ${fit(against.label, width - 30)} · ${at + 1}/${list.length}`}
             </Text>
           )}
-          {isOver && <Text dimColor>{` ${offset + 1}-${Math.min(total, offset + room)}/${total}`}</Text>}
+          {isOver && <Text dimColor>{` ${offset + 1}-${shownEnd}/${total}`}</Text>}
         </Box>
       )}
-      {!shown.isChanged && isOver && <Text dimColor>{`lines ${offset + 1}-${Math.min(total, offset + room)} of ${total}`}</Text>}
+      {!hasModes && isOver && <Text dimColor>{`lines ${offset + 1}-${shownEnd} of ${total}`}</Text>}
       {shown.note !== '' && <Text dimColor>{shown.note}</Text>}
       {body}
     </Box>
