@@ -43,7 +43,7 @@ const listOffset = atom({ plugin: 'file-explorer', key: 'listOffset' } as const,
 const previewOffset = atom({ plugin: 'file-explorer', key: 'previewOffset' } as const, 0)
 
 // What the explorer was last drawn as, so presses know where a file shows.
-const layout = { isSplit: false, sidebarColumns: 0, listRows: 20, previewRows: 20, icons: 'emoji' as IconStyle }
+const layout = { isSplit: false, sidebarColumns: 0, listRows: 20, previewRows: 20, listTotal: 0, previewTotal: 0, icons: 'emoji' as IconStyle }
 
 // VS Code's decoration colours, by the letter drawn at the row's end.
 const BADGE_COLOR: Record<string, string> = {
@@ -621,10 +621,14 @@ async function drawSidebar(
 
   const room = rows === undefined ? lines.length : Math.max(1, rows - fixed - extra.length)
   layout.listRows = room
+  layout.listTotal = lines.length
   const offset = rows === undefined ? 0 : clamp(await read($, listOffset), 0, Math.max(0, lines.length - room))
   const isOver = lines.length > room
   const scroll = (by: number) =>
-    update($, listOffset, now => clamp(now + by, 0, Math.max(0, lines.length - layout.listRows)))
+    update($, listOffset, now => {
+      const last = Math.max(0, lines.length - layout.listRows)
+      return clamp(Math.min(now, last) + by, 0, last)
+    })
 
   return (
     <Box flexDirection="column" width={rows === undefined ? undefined : width}>
@@ -712,9 +716,13 @@ async function drawPreview(
   const fixed = 1 + (shown.isChanged ? 1 : 0) + (shown.note !== '' ? 1 : 0)
   const room = rows === undefined ? total : Math.max(1, rows - fixed)
   layout.previewRows = room
+  layout.previewTotal = total
   const offset = rows === undefined ? 0 : clamp(await read($, previewOffset), 0, Math.max(0, total - room))
   const scroll = (by: number) =>
-    update($, previewOffset, now => clamp(now + by, 0, Math.max(0, total - layout.previewRows)))
+    update($, previewOffset, now => {
+      const last = Math.max(0, total - layout.previewRows)
+      return clamp(Math.min(now, last) + by, 0, last)
+    })
   const isOver = total > room
 
   const body: RenderElement[] = []
@@ -879,10 +887,13 @@ export const register: Register = (on, options) => {
   on('ui.scroll', { component: 'Pane', requestId: EXPLORER }, async ($, e, next) => {
     if (!layout.isSplit || e.origin.kind !== 'person' || e.pointer === undefined) return next(e)
     const by = Math.sign(e.by) * Math.max(WHEEL_ROWS, Math.abs(e.by))
+    // Clamped to the last window, so a wheel past the end does not bank rows.
     if (e.pointer.column < layout.sidebarColumns) {
-      await update($, listOffset, now => Math.max(0, now + by))
+      const last = Math.max(0, layout.listTotal - layout.listRows)
+      await update($, listOffset, now => clamp(Math.min(now, last) + by, 0, last))
     } else {
-      await update($, previewOffset, now => Math.max(0, now + by))
+      const last = Math.max(0, layout.previewTotal - layout.previewRows)
+      await update($, previewOffset, now => clamp(Math.min(now, last) + by, 0, last))
     }
     return {}
   })

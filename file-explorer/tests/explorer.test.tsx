@@ -180,6 +180,24 @@ test('splits into a tree and a preview when wide', async ($, on) => {
 
   await ui.press({ key: 'down' })
   expect((await ui.find({ type: 'Code' }))?.props.startLine).toBeGreaterThan(1)
+
+  // Wheeling far past the end, then one tick up, leaves the end at once.
+  const wheel = (by: number) =>
+    $.ui.scroll({
+      component: 'Pane',
+      requestId: 'file-explorer',
+      offset: 0,
+      by,
+      bodyRows: 30,
+      contentRows: 30,
+      origin: { kind: 'person' },
+      pointer: { column: 100, row: 5 },
+    })
+  for (let i = 0; i < 100; i++) await wheel(1)
+  const atEnd = Number((await ui.find({ type: 'Code' }))?.props.startLine)
+  expect(atEnd).toBeGreaterThan(150)
+  await wheel(-1)
+  expect(Number((await ui.find({ type: 'Code' }))?.props.startLine)).toBeLessThan(atEnd)
 })
 
 test('draws Nerd Font icons in colour when configured', { options: { icons: 'nerd' } }, async ($, on) => {
