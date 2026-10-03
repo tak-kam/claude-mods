@@ -1,0 +1,12 @@
+{
+  "name": "claude-mods",
+  "owner": { "name": "tak-kam" },
+  "metadata": { "description": "Claude Code mods (function hook plugins)" },
+  "plugins": [
+    {
+      "name": "file-explorer",
+      "source": "./file-explorer",
+      "description": "A VS Code-style explorer pane: files, git changes, history, diffs and quoting into the prompt"
+    }
+  ]
+}
