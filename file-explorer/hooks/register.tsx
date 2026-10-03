@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { ElementTable, EngineInterface, Register, RenderElement } from 'claude-code'
 
 import type {
   ExplorerBase,
@@ -19,6 +19,10 @@ const MAX_ROWS = 1500
 const MAX_PREVIEW_BYTES = 512 * 1024
 const MAX_CODE_CHARS = 10000
 const MAX_COMMITS = 100
+// The explorer splits into a sidebar and a preview from this many columns.
+const SPLIT_MIN_COLUMNS = 80
+const SPLIT_COLUMNS = 110
+const WHEEL_ROWS = 3
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
 const HEAD: ExplorerBase = { ref: 'HEAD', label: 'HEAD' }
 
@@ -33,6 +37,11 @@ const gitError = atom({ plugin: 'file-explorer', key: 'gitError' } as const, '')
 const touched = atom({ plugin: 'file-explorer', key: 'touched' } as const, [])
 const selected = atom({ plugin: 'file-explorer', key: 'selected' } as const, '')
 const preview = atom({ plugin: 'file-explorer', key: 'preview' } as const, null)
+const listOffset = atom({ plugin: 'file-explorer', key: 'listOffset' } as const, 0)
+const previewOffset = atom({ plugin: 'file-explorer', key: 'previewOffset' } as const, 0)
+
+// What the explorer was last drawn as, so presses know where a file shows.
+const layout = { isSplit: false, sidebarColumns: 0, listRows: 20, previewRows: 20 }
 
 // VS Code's decoration colours, by the letter drawn at the row's end.
 const BADGE_COLOR: Record<string, string> = {
@@ -338,15 +347,37 @@ async function showPath($: EngineInterface, rel: string, options: { mode?: 'file
     isChanged: change !== undefined,
     isOnDisk: file.isOnDisk,
   }
+  const before = await read($, preview)
+  if (before === null || before.path !== rel || before.mode !== mode) await update($, previewOffset, () => 0)
   await update($, preview, () => shown)
-  await $.ui.open({ id: PREVIEW, title: baseName(rel) })
+  await reveal($, rel)
+  if (!layout.isSplit) await $.ui.open({ id: PREVIEW, title: baseName(rel) })
+}
+
+// Scrolls the sidebar so the row of `rel` is in its window.
+async function reveal($: EngineInterface, rel: string) {
+  const current = await read($, view)
+  let at = -1
+  if (current === 'changes') at = (await read($, changes)).findIndex(one => one.path === rel)
+  if (current === 'files') {
+    at = flatten(await read($, listings), new Set(await read($, expanded))).findIndex(row => row.rel === rel)
+  }
+  if (at < 0) return
+  await update($, listOffset, offset =>
+    at < offset ? at : at >= offset + layout.listRows ? at - layout.listRows + 1 : offset,
+  )
 }
 
 async function reloadPreview($: EngineInterface) {
   const shown = await read($, preview)
   if (shown === null) return
-  const isOpen = (await $.ui.panes()).some(pane => pane.id === PREVIEW)
-  if (isOpen) await showPath($, shown.path, { mode: shown.mode })
+  const isOpen = !layout.isSplit && (await $.ui.panes()).some(pane => pane.id === PREVIEW)
+  const isSplitOpen = layout.isSplit && (await $.ui.panes()).some(pane => pane.id === EXPLORER)
+  if (isOpen || isSplitOpen) {
+    const offset = await read($, previewOffset)
+    await showPath($, shown.path, { mode: shown.mode })
+    await update($, previewOffset, () => offset)
+  }
 }
 
 async function mention($: EngineInterface, rel: string) {
@@ -390,6 +421,25 @@ function splitHunks(diff: string): { header: string; body: string; lines: string
     })
 }
 
+// Rows `skip` to `skip + take` of a hunk's body lines, its header recounted
+// so the slice still parses as a hunk.
+function sliceHunk(body: string, skip: number, take: number): string {
+  const lines = body.replace(/\n$/, '').split('\n')
+  const header = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/.exec(lines[0] ?? '')
+  const content = lines.slice(1)
+  if (header === null) return body
+  let oldStart = Number(header[1])
+  let newStart = Number(header[2])
+  for (const line of content.slice(0, skip)) {
+    if (!line.startsWith('+')) oldStart++
+    if (!line.startsWith('-')) newStart++
+  }
+  const kept = content.slice(skip, skip + take)
+  const oldCount = kept.filter(line => !line.startsWith('+')).length
+  const newCount = kept.filter(line => !line.startsWith('-')).length
+  return `${[`@@ -${oldStart},${oldCount} +${newStart},${newCount} @@${header[3]}`, ...kept].join('\n')}\n`
+}
+
 async function refreshAll($: EngineInterface) {
   const open = await read($, expanded)
   const kept: string[] = []
@@ -406,7 +456,7 @@ async function refreshAll($: EngineInterface) {
 async function openExplorer($: EngineInterface, wanted: string) {
   if (wanted === 'files' || wanted === 'changes' || wanted === 'history') await update($, view, () => wanted as ExplorerView)
   await refreshAll($)
-  return $.ui.open({ id: EXPLORER, title: 'Explorer', focus: true })
+  return $.ui.open({ id: EXPLORER, title: 'Explorer', focus: true, columns: SPLIT_COLUMNS })
 }
 
 // ---- drawing helpers -----------------------------------------------------
@@ -437,6 +487,305 @@ function folderBadges(list: ExplorerChange[]): Record<string, string> {
     }
   }
   return out
+}
+
+// ---- drawing -------------------------------------------------------------
+
+type Elements = ElementTable
+type InputElement = ElementTable<'terminal'>['Input'] | undefined
+
+const clamp = (value: number, low: number, high: number) => Math.max(low, Math.min(high, value))
+
+// The tree, the changes or the history; `rows` bounds the list to a window
+// of its own (split view), absent draws it whole for the pane to scroll.
+async function drawSidebar(
+  $: EngineInterface,
+  els: Elements,
+  Input: InputElement,
+  width: number,
+  rows: number | undefined,
+): Promise<RenderElement> {
+  const { Box, Text, Button } = els
+  const dir = await read($, root)
+  const current = await read($, view)
+  const list = await read($, changes)
+  const edited = new Set(await read($, touched))
+  const chosen = await read($, selected)
+  const against = await read($, base)
+
+  let lines: { key: string; node: RenderElement }[] = []
+  let fixed = 2
+  const extra: RenderElement[] = []
+
+  if (current === 'history') {
+    const commits = await read($, history)
+    if (commits.length === 0) extra.push(<Text dimColor>No commits.</Text>)
+    lines = commits.map(commit => {
+      const room = width - commit.short.length - 2
+      const subject = fit(commit.subject, room)
+      const rest = room - subject.length - 1
+      return {
+        key: commit.sha,
+        node: (
+          <Box key={`line:${commit.sha}`} flexDirection="row">
+            <Text color="blue">{against.head === commit.sha ? '▌' : ' '}</Text>
+            <Text color="yellow">{commit.short} </Text>
+            <Button key={`commit:${commit.sha}`} label={subject} plain onPress={() => openCommit($, commit)} />
+            {rest > 6 && <Text dimColor> {fit(`${commit.when}, ${commit.author}`, rest)}</Text>}
+          </Box>
+        ),
+      }
+    })
+  } else if (current === 'changes') {
+    const failed = await read($, gitError)
+    fixed += Input === undefined ? 1 : 2
+    if (failed !== '') extra.push(<Text color="red">{failed}</Text>)
+    else if (list.length === 0) extra.push(<Text dimColor>No changes.</Text>)
+    lines = list.map(change => {
+      const where = parentOf(change.path)
+      const mark = edited.has(change.path) ? '✎' : ''
+      const room = width - 4 - mark.length
+      const label = fit(baseName(change.path), room)
+      const rest = room - label.length - 1
+      return {
+        key: change.path,
+        node: (
+          <Box key={`line:${change.path}`} flexDirection="row">
+            <Text color="blue">{change.path === chosen ? '▌' : ' '}</Text>
+            <Button
+              key={`change:${change.path}`}
+              label={label}
+              plain
+              dimColor={change.letter === 'D' ? true : undefined}
+              onPress={() => showPath($, change.path, { mode: 'diff' })}
+            />
+            {where !== '' && rest > 3 && <Text dimColor> {fit(where, rest)}</Text>}
+            <Box flexGrow={1} />
+            {mark !== '' && <Text color="blue">{mark}</Text>}
+            <Text color={BADGE_COLOR[change.letter] ?? 'yellow'}> {change.letter}</Text>
+          </Box>
+        ),
+      }
+    })
+  } else {
+    const all = await read($, listings)
+    const open = new Set(await read($, expanded))
+    const status: Record<string, string> = {}
+    for (const change of list) status[change.path] = change.letter
+    const folders = folderBadges(list)
+    const tree = flatten(all, open)
+    if (tree.length === 0) extra.push(<Text dimColor>(empty)</Text>)
+    lines = tree.map(({ rel, depth, entry }) => {
+      const letter = entry.isDir ? folders[rel] : status[rel]
+      const badge = letter === undefined ? '' : entry.isDir ? '●' : letter
+      const mark = edited.has(rel) ? '✎' : ''
+      const indent = '  '.repeat(depth)
+      // Folders: a blue chevron and a trailing slash; files: a dim dot.
+      const icon = entry.isDir ? (open.has(rel) ? '▾ ' : '▸ ') : '· '
+      const name = entry.isDir ? `${entry.name}/` : entry.name
+      const room = width - 1 - indent.length - icon.length - badge.length - mark.length - 2
+      return {
+        key: rel,
+        node: (
+          <Box key={`line:${rel}`} flexDirection="row">
+            <Text color="blue">{rel === chosen ? '▌' : ' '}</Text>
+            <Text dimColor>{indent}</Text>
+            {entry.isDir ? <Text color="blue" bold>{icon}</Text> : <Text dimColor>{icon}</Text>}
+            <Button
+              key={`row:${rel}`}
+              label={fit(name, room)}
+              plain
+              onPress={() => (entry.isDir ? toggleDir($, rel) : showPath($, rel, { mode: 'file', size: entry.size }))}
+            />
+            <Box flexGrow={1} />
+            {mark !== '' && <Text color="blue">{mark}</Text>}
+            {badge !== '' && <Text color={BADGE_COLOR[letter ?? ''] ?? 'yellow'}> {badge}</Text>}
+          </Box>
+        ),
+      }
+    })
+  }
+
+  const room = rows === undefined ? lines.length : Math.max(1, rows - fixed - extra.length)
+  layout.listRows = room
+  const offset = rows === undefined ? 0 : clamp(await read($, listOffset), 0, Math.max(0, lines.length - room))
+  const isOver = lines.length > room
+  const scroll = (by: number) =>
+    update($, listOffset, now => clamp(now + by, 0, Math.max(0, lines.length - layout.listRows)))
+
+  return (
+    <Box flexDirection="column" width={rows === undefined ? undefined : width}>
+      <Box flexDirection="row" justifyContent="space-between">
+        <Text bold>{fit(baseName(dir).toUpperCase() || dir, width - 8)}</Text>
+        <Box flexDirection="row" gap={1}>
+          <Button key="refresh" label="↻" plain onPress={() => refreshAll($)} />
+          {current === 'files' && <Button key="collapse" label="⊟" plain onPress={() => update($, expanded, () => [])} />}
+          <Button
+            key="mention"
+            label="@"
+            plain
+            onPress={async () => {
+              const rel = await read($, selected)
+              if (rel === '') $.ui.toast('Select a file first')
+              else await mention($, rel)
+            }}
+          />
+        </Box>
+      </Box>
+      <Box flexDirection="row" justifyContent="space-between">
+        <Box flexDirection="row" gap={1}>
+          <Button key="tab:files" label="Files" plain hotkey="f" dimColor={current === 'files' ? undefined : true}
+            onPress={() => update($, view, () => 'files' as const)} />
+          <Button key="tab:changes" label={`Changes ${list.length}`} plain hotkey="c"
+            dimColor={current === 'changes' ? undefined : true}
+            onPress={() => update($, view, () => 'changes' as const)} />
+          <Button key="tab:history" label="History" plain hotkey="h" dimColor={current === 'history' ? undefined : true}
+            onPress={() => update($, view, () => 'history' as const)} />
+        </Box>
+        {isOver && (
+          <Box flexDirection="row">
+            <Button key="list:up" label="▲" plain onPress={() => scroll(-Math.max(1, room - 2))} />
+            <Button key="list:down" label="▼" plain onPress={() => scroll(Math.max(1, room - 2))} />
+          </Box>
+        )}
+      </Box>
+      {current === 'changes' && (
+        <Box flexDirection="row" gap={1}>
+          <Text dimColor>{against.head === undefined ? 'vs' : 'in'}</Text>
+          <Button key="base" label={fit(against.label, width - 4)} plain onPress={() => cycleBase($)} />
+        </Box>
+      )}
+      {current === 'changes' && Input !== undefined && (
+        <Input key="base-ref" placeholder="ref or a..b (empty = HEAD)" onSubmit={(value: string) => chooseBase($, value)} />
+      )}
+      {extra}
+      {lines.slice(offset, offset + room).map(line => line.node)}
+    </Box>
+  )
+}
+
+// The open file or diff; `rows` windows it by previewOffset (split view).
+async function drawPreview(
+  $: EngineInterface,
+  els: Elements,
+  width: number,
+  rows: number | undefined,
+  isOwnPane: boolean,
+): Promise<RenderElement> {
+  const { Box, Text, Button, Code } = els
+  const shown = await read($, preview)
+  if (shown === null) {
+    return (
+      <Box flexDirection="column" flexGrow={1}>
+        <Text dimColor>Select a file in the explorer.</Text>
+      </Box>
+    )
+  }
+  const list = await read($, changes)
+  const against = await read($, base)
+  const at = list.findIndex(one => one.path === shown.path)
+  const change = list[at]
+  const verb = against.head === undefined ? 'vs' : 'in'
+  const step = (by: number) => {
+    const target = at < 0 ? list[0] : list[(at + by + list.length) % list.length]
+    if (target !== undefined) void showPath($, target.path, { mode: 'diff' })
+  }
+
+  // Each hunk is a label row and its lines; the file is its lines.
+  const hunks = shown.mode === 'diff' ? splitHunks(shown.diff) : []
+  const fileLines = shown.mode === 'file' && shown.text !== '' ? shown.text.replace(/\n$/, '').split('\n') : []
+  const hunkRows = hunks.map(hunk => hunk.body.replace(/\n$/, '').split('\n').length)
+  const total = shown.mode === 'file' ? fileLines.length : hunkRows.reduce((sum, n) => sum + n, 0)
+  const fixed = 1 + (shown.isChanged ? 1 : 0) + (shown.note !== '' ? 1 : 0)
+  const room = rows === undefined ? total : Math.max(1, rows - fixed)
+  layout.previewRows = room
+  const offset = rows === undefined ? 0 : clamp(await read($, previewOffset), 0, Math.max(0, total - room))
+  const scroll = (by: number) =>
+    update($, previewOffset, now => clamp(now + by, 0, Math.max(0, total - layout.previewRows)))
+  const isOver = total > room
+
+  const body: RenderElement[] = []
+  if (shown.mode === 'file' && fileLines.length > 0) {
+    body.push(
+      <Code
+        source={`${fileLines.slice(offset, offset + room).join('\n')}\n`}
+        path={shown.path}
+        startLine={offset + 1}
+        wrap="truncate-end"
+      />,
+    )
+  }
+  let skip = offset
+  let left = room
+  hunks.forEach((hunk, i) => {
+    const size = hunkRows[i] ?? 1
+    if (left <= 0 || skip >= size) {
+      skip = Math.max(0, skip - size)
+      return
+    }
+    // Row 0 of a hunk is its label; the rest are its body lines.
+    if (skip === 0) {
+      body.push(
+        <Box key={`hunk:${i}`} flexDirection="row" justifyContent="space-between">
+          <Text dimColor>{fit(hunk.lines, width - 10)}</Text>
+          <Button
+            key={`quote:${i}`}
+            label="❝ quote"
+            plain
+            dimColor
+            onPress={() => quote($, hunk.body, `\`${shown.path}\` ${hunk.lines} (diff ${verb} ${against.label})`, 'diff')}
+          />
+        </Box>,
+      )
+      left--
+    }
+    const from = Math.max(0, skip - 1)
+    const take = Math.min(left, size - 1 - from)
+    if (take > 0) {
+      body.push(<Code source={sliceHunk(hunk.body, from, take)} format="diff" path={shown.path} wrap="truncate-end" />)
+      left -= take
+    }
+    skip = 0
+  })
+
+  return (
+    <Box flexDirection="column" flexGrow={1}>
+      <Box flexDirection="row" justifyContent="space-between">
+        <Text bold>{fit(shown.path, width - 16)}</Text>
+        <Box flexDirection="row" gap={1}>
+          {isOver && <Button key="up" label="▲" plain hotkey="k" onPress={() => scroll(-Math.max(1, Math.floor(room / 2)))} />}
+          {isOver && <Button key="down" label="▼" plain hotkey="j" onPress={() => scroll(Math.max(1, Math.floor(room / 2)))} />}
+          {list.length > 0 && <Button key="prev" label="‹" plain hotkey="p" onPress={() => step(-1)} />}
+          {list.length > 0 && <Button key="next" label="›" plain hotkey="n" onPress={() => step(1)} />}
+          <Button key="quote" label="❝" plain hotkey="q" onPress={() => quoteSelection($, shown.path)} />
+          {isOwnPane && <Button key="mention" label="@" plain onPress={() => mention($, shown.path)} />}
+          {isOwnPane && (
+            <Button key="close" label="✕" plain role="dismiss" onPress={() => $.ui.close({ id: PREVIEW })} />
+          )}
+        </Box>
+      </Box>
+      {shown.isChanged && (
+        <Box flexDirection="row" gap={1}>
+          {shown.isOnDisk && (
+            <Button key="mode:file" label="File" plain hotkey="o" dimColor={shown.mode === 'file' ? undefined : true}
+              onPress={() => showPath($, shown.path, { mode: 'file' })} />
+          )}
+          <Button key="mode:diff" label="Diff" plain hotkey="d" dimColor={shown.mode === 'diff' ? undefined : true}
+            onPress={() => showPath($, shown.path, { mode: 'diff' })} />
+          {change !== undefined && (
+            <Text dimColor>
+              <Text color={BADGE_COLOR[change.letter] ?? 'yellow'}>{change.letter}</Text>
+              {` ${verb} ${fit(against.label, width - 30)} · ${at + 1}/${list.length}`}
+            </Text>
+          )}
+          {isOver && <Text dimColor>{` ${offset + 1}-${Math.min(total, offset + room)}/${total}`}</Text>}
+        </Box>
+      )}
+      {!shown.isChanged && isOver && <Text dimColor>{`lines ${offset + 1}-${Math.min(total, offset + room)} of ${total}`}</Text>}
+      {shown.note !== '' && <Text dimColor>{shown.note}</Text>}
+      {body}
+    </Box>
+  )
 }
 
 export const register: Register = on => {
@@ -508,254 +857,41 @@ export const register: Register = on => {
     return ran
   })
 
+  // Split view: the wheel scrolls the column under the pointer.
+  on('ui.scroll', { component: 'Pane', requestId: EXPLORER }, async ($, e, next) => {
+    if (!layout.isSplit || e.origin.kind !== 'person' || e.pointer === undefined) return next(e)
+    const by = Math.sign(e.by) * Math.max(WHEEL_ROWS, Math.abs(e.by))
+    if (e.pointer.column < layout.sidebarColumns) {
+      await update($, listOffset, now => Math.max(0, now + by))
+    } else {
+      await update($, previewOffset, now => Math.max(0, now + by))
+    }
+    return {}
+  })
+
   on('ui.render', { component: 'Pane', requestId: EXPLORER }, async ($, e) => {
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const els = $.ui.resolve(e)
+    const { Box, Text } = els
     const Input = e.surface === 'mobile' ? undefined : $.ui.resolve(e).Input
-    const dir = await read($, root)
-    const current = await read($, view)
-    const list = await read($, changes)
-    const edited = new Set(await read($, touched))
-    const chosen = await read($, selected)
     const width = Math.max(20, e.props.bodyColumns)
+    const rows = Math.max(8, e.props.scroll.bodyRows)
+    layout.isSplit = width >= SPLIT_MIN_COLUMNS
+    if (!layout.isSplit) return drawSidebar($, els, Input, width, undefined)
 
-    const header = (
-      <Box flexDirection="column">
-        <Box flexDirection="row" justifyContent="space-between">
-          <Text bold>{fit(baseName(dir).toUpperCase() || dir, width - 12)}</Text>
-          <Box flexDirection="row" gap={1}>
-            <Button key="refresh" label="↻" plain onPress={() => refreshAll($)} />
-            {current === 'files' && (
-              <Button key="collapse" label="⊟" plain onPress={() => update($, expanded, () => [])} />
-            )}
-            <Button
-              key="mention"
-              label="@"
-              plain
-              onPress={async () => {
-                const rel = await read($, selected)
-                if (rel === '') $.ui.toast('Select a file first')
-                else await mention($, rel)
-              }}
-            />
-          </Box>
-        </Box>
-        <Box flexDirection="row" gap={1}>
-          <Button
-            key="tab:files"
-            label="Files"
-            hotkey="f"
-            variant={current === 'files' ? 'primary' : 'secondary'}
-            onPress={() => update($, view, () => 'files' as const)}
-          />
-          <Button
-            key="tab:changes"
-            label={`Changes ${list.length}`}
-            hotkey="c"
-            variant={current === 'changes' ? 'primary' : 'secondary'}
-            onPress={() => update($, view, () => 'changes' as const)}
-          />
-          <Button
-            key="tab:history"
-            label="History"
-            hotkey="h"
-            variant={current === 'history' ? 'primary' : 'secondary'}
-            onPress={() => update($, view, () => 'history' as const)}
-          />
-        </Box>
-      </Box>
-    )
-
-    if (current === 'history') {
-      const commits = await read($, history)
-      const against = await read($, base)
-      return (
-        <Box flexDirection="column">
-          {header}
-          {commits.length === 0 && <Text dimColor>No commits.</Text>}
-          {commits.map(commit => {
-            const isOpen = against.head === commit.sha
-            const room = width - commit.short.length - 3
-            return (
-              <Box key={`line:${commit.sha}`} flexDirection="column">
-                <Box flexDirection="row">
-                  <Text color="blue">{isOpen ? '▌' : ' '}</Text>
-                  <Text color="yellow">{commit.short} </Text>
-                  <Button
-                    key={`commit:${commit.sha}`}
-                    label={fit(commit.subject, room)}
-                    plain
-                    onPress={() => openCommit($, commit)}
-                  />
-                </Box>
-                <Text dimColor>{fit(`  ${commit.author} · ${commit.when}`, width)}</Text>
-              </Box>
-            )
-          })}
-        </Box>
-      )
-    }
-
-    if (current === 'changes') {
-      const against = await read($, base)
-      const failed = await read($, gitError)
-      return (
-        <Box flexDirection="column">
-          {header}
-          <Box flexDirection="row" gap={1}>
-            <Text dimColor>{against.head === undefined ? 'vs' : 'in'}</Text>
-            <Button key="base" label={fit(against.label, width - 6)} plain onPress={() => cycleBase($)} />
-          </Box>
-          {Input !== undefined && (
-            <Input
-              key="base-ref"
-              placeholder="ref or a..b (empty = HEAD)"
-              onSubmit={(value: string) => chooseBase($, value)}
-            />
-          )}
-          {failed !== '' && <Text color="red">{failed}</Text>}
-          {failed === '' && list.length === 0 && <Text dimColor>No changes.</Text>}
-          {list.slice(0, MAX_ROWS).map(change => {
-            const where = parentOf(change.path)
-            const mark = edited.has(change.path) ? '✎' : ''
-            const room = width - 4 - mark.length
-            const label = fit(baseName(change.path), room)
-            const rest = room - label.length - 1
-            return (
-              <Box key={`line:${change.path}`} flexDirection="row">
-                <Text color="blue">{change.path === chosen ? '▌' : ' '}</Text>
-                <Button
-                  key={`change:${change.path}`}
-                  label={label}
-                  plain
-                  dimColor={change.letter === 'D' ? true : undefined}
-                  onPress={() => showPath($, change.path, { mode: 'diff' })}
-                />
-                {where !== '' && rest > 3 && <Text dimColor> {fit(where, rest)}</Text>}
-                <Box flexGrow={1} />
-                {mark !== '' && <Text color="blue">{mark}</Text>}
-                <Text color={BADGE_COLOR[change.letter] ?? 'yellow'}> {change.letter}</Text>
-              </Box>
-            )
-          })}
-        </Box>
-      )
-    }
-
-    const all = await read($, listings)
-    const open = new Set(await read($, expanded))
-    const status: Record<string, string> = {}
-    for (const change of list) status[change.path] = change.letter
-    const folders = folderBadges(list)
-    const rows = flatten(all, open)
-
+    const sidebar = clamp(Math.floor(width * 0.32), 26, 44)
+    layout.sidebarColumns = sidebar
     return (
-      <Box flexDirection="column">
-        {header}
-        {rows.length === 0 && <Text dimColor>(empty)</Text>}
-        {rows.map(({ rel, depth, entry }) => {
-          const letter = entry.isDir ? folders[rel] : status[rel]
-          const badge = letter === undefined ? '' : entry.isDir ? '●' : letter
-          const mark = edited.has(rel) ? '✎' : ''
-          const chevron = entry.isDir ? (open.has(rel) ? '▾ ' : '▸ ') : '  '
-          const indent = '  '.repeat(depth)
-          const room = width - 1 - indent.length - chevron.length - badge.length - mark.length - 2
-
-          return (
-            <Box key={`line:${rel}`} flexDirection="row">
-              <Text color="blue">{rel === chosen ? '▌' : ' '}</Text>
-              <Text dimColor>{indent}</Text>
-              <Button
-                key={`row:${rel}`}
-                label={chevron + fit(entry.name, room)}
-                plain
-                onPress={() =>
-                  entry.isDir ? toggleDir($, rel) : showPath($, rel, { mode: 'file', size: entry.size })
-                }
-              />
-              <Box flexGrow={1} />
-              {mark !== '' && <Text color="blue">{mark}</Text>}
-              {badge !== '' && <Text color={BADGE_COLOR[letter ?? ''] ?? 'yellow'}> {badge}</Text>}
-            </Box>
-          )
-        })}
-        {rows.length >= MAX_ROWS && <Text dimColor>… more rows not shown; collapse folders</Text>}
+      <Box flexDirection="row">
+        {await drawSidebar($, els, Input, sidebar, rows)}
+        <Box width={1} marginRight={1}>
+          <Text dimColor>{Array.from({ length: rows }, () => '│').join('\n')}</Text>
+        </Box>
+        {await drawPreview($, els, width - sidebar - 2, rows, false)}
       </Box>
     )
   })
 
   on('ui.render', { component: 'Pane', requestId: PREVIEW }, async ($, e) => {
-    const { Box, Text, Button, Code } = $.ui.resolve(e)
-    const shown = await read($, preview)
-    if (shown === null) return <Text dimColor>Select a file in the explorer.</Text>
-    const width = Math.max(20, e.props.bodyColumns)
-    const list = await read($, changes)
-    const against = await read($, base)
-    const at = list.findIndex(one => one.path === shown.path)
-    const change = list[at]
-    const step = (by: number) => {
-      const target = at < 0 ? list[0] : list[(at + by + list.length) % list.length]
-      if (target !== undefined) void showPath($, target.path, { mode: 'diff' })
-    }
-
-    return (
-      <Box flexDirection="column">
-        <Box flexDirection="row" justifyContent="space-between">
-          <Text bold>{fit(shown.path, width - 10)}</Text>
-          <Box flexDirection="row" gap={1}>
-            {list.length > 0 && <Button key="prev" label="‹" plain hotkey="p" onPress={() => step(-1)} />}
-            {list.length > 0 && <Button key="next" label="›" plain hotkey="n" onPress={() => step(1)} />}
-            <Button key="quote" label="❝" plain hotkey="q" onPress={() => quoteSelection($, shown.path)} />
-            <Button key="mention" label="@" plain onPress={() => mention($, shown.path)} />
-            <Button key="close" label="✕" plain role="dismiss" onPress={() => $.ui.close({ id: PREVIEW })} />
-          </Box>
-        </Box>
-        {shown.isChanged && (
-          <Box flexDirection="row" gap={1}>
-            {shown.isOnDisk && (
-              <Button
-                key="mode:file"
-                label="File"
-                hotkey="f"
-                variant={shown.mode === 'file' ? 'primary' : 'secondary'}
-                onPress={() => showPath($, shown.path, { mode: 'file' })}
-              />
-            )}
-            <Button
-              key="mode:diff"
-              label="Diff"
-              hotkey="d"
-              variant={shown.mode === 'diff' ? 'primary' : 'secondary'}
-              onPress={() => showPath($, shown.path, { mode: 'diff' })}
-            />
-            {change !== undefined && (
-              <Text dimColor>
-                <Text color={BADGE_COLOR[change.letter] ?? 'yellow'}>{change.letter}</Text>
-                {` ${against.head === undefined ? 'vs' : 'in'} ${fit(against.label, width - 28)} · ${at + 1}/${list.length}`}
-              </Text>
-            )}
-          </Box>
-        )}
-        {shown.note !== '' && <Text dimColor>{shown.note}</Text>}
-        {shown.mode === 'diff' &&
-          splitHunks(shown.diff).map((hunk, i) => (
-            <Box key={`hunk:${i}`} flexDirection="column" marginTop={i === 0 ? 0 : 1}>
-              <Box flexDirection="row" justifyContent="space-between">
-                <Text dimColor>{fit(hunk.lines, width - 10)}</Text>
-                <Button
-                  key={`quote:${i}`}
-                  label="❝ quote"
-                  plain
-                  dimColor
-                  onPress={() => quote($, hunk.body, `\`${shown.path}\` ${hunk.lines} (diff ${against.head === undefined ? 'vs' : 'in'} ${against.label})`, 'diff')}
-                />
-              </Box>
-              <Code source={hunk.body} format="diff" path={shown.path} wrap="truncate-end" />
-            </Box>
-          ))}
-        {shown.mode === 'file' && shown.text !== '' && (
-          <Code source={shown.text} path={shown.path} startLine={1} wrap="truncate-end" />
-        )}
-      </Box>
-    )
+    return drawPreview($, $.ui.resolve(e), Math.max(20, e.props.bodyColumns), undefined, true)
   })
 }

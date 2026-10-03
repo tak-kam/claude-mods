@@ -57,7 +57,7 @@ function fakeGit(argv: readonly string[], log: string[]) {
   return ok('', 1)
 }
 
-const PANE = (id: string) => ({
+const PANE = (id: string, bodyColumns = 50) => ({
   plugin: 'file-explorer',
   surface: 'terminal' as const,
   component: 'Pane' as const,
@@ -65,7 +65,7 @@ const PANE = (id: string) => ({
   props: {
     title: id,
     isFocused: true,
-    bodyColumns: 50,
+    bodyColumns,
     placement: 'dock' as const,
     scroll: { offset: 0, bodyRows: 30 },
     view: {},
@@ -99,7 +99,8 @@ test('browses files and git changes with diffs', async ($, on) => {
 
   // Files view: folders first, decorations from git.
   const ui = await $.ui.mount(PANE('file-explorer'))
-  expect((await ui.find({ key: 'row:src' }))?.text).toBe('▸ src')
+  expect((await ui.find({ key: 'row:src' }))?.text).toBe('src/')
+  expect(await ui.find({ type: 'Text', text: '▸ ' })).toBeDefined()
   expect((await ui.find({ key: 'tab:changes' }))?.text).toBe('Changes 2')
   await ui.press({ key: 'row:src' })
   expect(await ui.find({ key: 'row:src/main.ts' })).toBeDefined()
@@ -113,7 +114,7 @@ test('browses files and git changes with diffs', async ($, on) => {
   await shown.press({ key: 'mode:diff' })
   const diff = await shown.find({ type: 'Code' })
   expect(diff?.props.format).toBe('diff')
-  expect(String(diff?.props.source).startsWith('@@ -1 +1 @@')).toBe(true)
+  expect(String(diff?.props.source).startsWith('@@ -1,1 +1,1 @@')).toBe(true)
 
   // Next walks to the untracked file's diff.
   await shown.press({ key: 'next' })
@@ -151,4 +152,30 @@ test('browses files and git changes with diffs', async ($, on) => {
   // A range typed into the base field.
   await ui.input({ key: 'base-ref', text: 'main..main' })
   expect((await ui.find({ key: 'base' }))?.text).toBe('main..main')
+})
+
+test('splits into a tree and a preview when wide', async ($, on) => {
+  const long = Array.from({ length: 200 }, (_, i) => `line ${i + 1}`).join('\n') + '\n'
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('fs.list', async (_$, e) => ({
+    value: (TREE[e.path] ?? []).map(one => ({ ...one, mtimeMs: 0, isLink: false })),
+  }))
+  on('fs.read', async () => ({ value: long }))
+  on('process.run', async (_$, e) => fakeGit(e.argv, []))
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+  on('ui.panes', async () => ({ value: [{ id: 'file-explorer', title: 'Explorer', isShown: true, isFocused: true, isPlaced: true }] }))
+
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE('file-explorer', 120))
+  await ui.press({ key: 'row:README.md' })
+
+  // The file shows beside the tree, windowed to the pane's rows.
+  const code = await ui.find({ type: 'Code' })
+  expect(code?.props.startLine).toBe(1)
+  expect(String(code?.props.source).split('\n').length - 1).toBeLessThan(30)
+  expect(await ui.find({ key: 'row:src' })).toBeDefined()
+
+  await ui.press({ key: 'down' })
+  expect((await ui.find({ type: 'Code' }))?.props.startLine).toBeGreaterThan(1)
 })

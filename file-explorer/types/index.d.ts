@@ -47,6 +47,8 @@ declare module 'claude-code' {
       touched: string[]
       selected: string
       preview: ExplorerPreview | null
+      listOffset: number
+      previewOffset: number
     }
   }
 }
