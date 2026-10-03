@@ -22,10 +22,13 @@ export type ExplorerChange = {
 }
 
 // Changes are `ref` against the working tree, or against `head` when set.
+// A `turn` base is a snapshot of the working tree taken as a prompt was
+// sent: changes are that tree against a fresh snapshot of the tree now.
 export type ExplorerBase = {
   ref: string
   label: string
   head?: string
+  kind?: 'turn'
 }
 
 export type ExplorerCommit = {
@@ -64,6 +67,8 @@ declare module 'claude-code' {
       selected: string
       preview: ExplorerPreview | null
       listOffset: number
+      follow: boolean
+      lastPrompt: ExplorerBase | null
       search: ExplorerSearch
       previewOffset: number
     }

@@ -323,3 +323,79 @@ test('finds files by name and text with ripgrep', async ($, on) => {
   expect(last).not.toContain('--fixed-strings')
   expect(last).toContain('--case-sensitive')
 })
+
+test('follows Claude, diffs the last prompt, and names lines', async ($, on) => {
+  const long = Array.from({ length: 80 }, (_, i) => (i === 59 ? 'const needle = 1' : `line ${i + 1}`)).join('\n') + '\n'
+  const runs: { args: string; index?: string }[] = []
+  let trees = 0
+  let filled = ''
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('fs.list', async (_$, e) => ({
+    value: (TREE[e.path] ?? []).map(one => ({ ...one, mtimeMs: 0, isLink: false })),
+  }))
+  on('fs.read', async () => ({ value: long }))
+  on('fs.exists', async () => ({ value: false }))
+  on('fs.stat', async () => ({ value: { kind: 'file' as const, size: 30, mtimeMs: 0, isLink: false } }))
+  on('process.run', async (_$, e) => {
+    const args = e.argv.slice(1).join(' ')
+    runs.push({ args, index: e.init?.env?.GIT_INDEX_FILE })
+    if (args === 'rev-parse --git-path file-explorer-index') return ok('.git/file-explorer-index\n')
+    if (args === 'write-tree') return ok(`tree${++trees}\n`)
+    if (args === 'add -A' || args === 'read-tree HEAD') return ok('')
+    if (args.startsWith('diff --relative --name-status') && args.includes('tree1')) return ok('M\0src/main.ts\0')
+    if (args.startsWith('diff --relative --no-color') && args.includes('tree1')) {
+      return ok('@@ -58,5 +58,5 @@\n line 58\n line 59\n-const needle = 0\n+const needle = 1\n line 61\n line 62\n')
+    }
+    return fakeGit(e.argv, [])
+  })
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+  on('ui.panes', async () => ({
+    value: [{ id: 'file-explorer', title: 'Explorer', isShown: true, isFocused: false, isPlaced: true }],
+  }))
+  on('ui.selection', async () => ({ value: undefined }))
+  on('prompt.submit', async (_$, e) => ({ text: e.text }))
+  on('prompt.read', async () => ({ value: { text: '', cursor: 0 } }))
+  on('prompt.fill', async (_$, e) => {
+    filled = e.text
+    return { isFilled: true as const, text: e.text }
+  })
+  on('tool.call', async () => ({ result: {} as never }))
+  on('clock.now', async () => ({ value: new Date(2026, 9, 3, 12, 34).getTime() }))
+  on('ui.toast', async () => ({ value: undefined }))
+
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE('file-explorer', 120))
+
+  // A prompt snapshots the working tree through the explorer's own index.
+  await $.prompt.submit({ text: 'fix the needle', wait: false, origin: { kind: 'composer' } } as never)
+  const added = runs.find(one => one.args === 'add -A')
+  expect(added?.index).toBe(`${ROOT}/.git/file-explorer-index`)
+
+  // Claude reading a file shows it at the lines it read.
+  await $.tool.call({ tool: 'Read', file_path: `${ROOT}/src/util.ts`, offset: 40 } as never)
+  let code = await ui.find({ type: 'Code' })
+  expect(code?.props.path).toBe('src/util.ts')
+  expect(code?.props.startLine).toBe(40)
+
+  // The last-prompt base diffs the snapshot against the tree now.
+  await ui.press({ key: 'tab:changes' })
+  await ui.press({ key: 'base' })
+  expect(String((await ui.find({ key: 'base' }))?.text)).toMatch(/^last prompt \(\d\d:\d\d\)$/)
+  expect(await ui.find({ key: 'change:src/main.ts' })).toBeDefined()
+
+  // Claude editing a file shows the diff at the hunk it touched.
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/src/main.ts`, old_string: 'const needle = 0', new_string: 'const needle = 1' } as never)
+  code = await ui.find({ type: 'Code' })
+  expect(code?.props.format).toBe('diff')
+  expect(String(code?.props.source)).toContain('+const needle = 1')
+
+  // # names the lines in view: here the hunk's new side.
+  await ui.press({ key: 'ref' })
+  expect(filled).toBe('@src/main.ts (lines 58-62) ')
+
+  // Follow off: a read no longer moves the preview.
+  await ui.press({ key: 'follow' })
+  await $.tool.call({ tool: 'Read', file_path: `${ROOT}/src/util.ts` } as never)
+  expect((await ui.find({ type: 'Code' }))?.props.format).toBe('diff')
+})

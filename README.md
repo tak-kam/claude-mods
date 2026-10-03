@@ -42,6 +42,9 @@ claude --plugin-dir ./file-explorer
 
 - `/files [files|changes|history|search]` opens the explorer; `/changes [ref | a..b | a...b]` opens the changes view; `/search [text]` searches file contents
 - From 80 columns wide the pane splits: the tree on the left, the open file or diff on the right, each scrolled on its own (the wheel scrolls the column under the pointer). Narrower, the file opens in a pane of its own. `/files` asks the dock for 110 columns; drag it wider or narrower as you like.
+- **Follow** (split view, on by default; `follow` in the sidebar header): when Claude reads a file the preview shows it at the lines read; when Claude edits one it shows the diff at the hunk it changed
+- **Last prompt** base: each prompt you send snapshots the working tree (through an index of the explorer's own under `.git/`, leaving your index and stash alone), and the Changes base cycles HEAD → last prompt → default branch, so you can review just what the latest turn changed; `/changes turn` selects it
+- `#` (`r`) in the preview inserts `@path (lines a-b)`: the lines you selected with the mouse, else the lines in view; `❝` quotes now name the lines too
 - Files and folders carry icons by name and extension (📁 📂 📘 📝 🐍 …); folders also get a blue `▸`/`▾` and a trailing `/`
 - Icon style is the `icons` option in `/config`: `emoji` (default, any terminal), `nerd` (needs a Nerd Font; coloured like VS Code), or `ascii`
 - Explorer: `f` Files, `c` Changes, `h` History, `s` Search

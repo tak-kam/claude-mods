@@ -58,13 +58,15 @@ const NO_SEARCH: ExplorerSearch = {
 }
 const search = atom({ plugin: 'file-explorer', key: 'search' } as const, NO_SEARCH)
 const listOffset = atom({ plugin: 'file-explorer', key: 'listOffset' } as const, 0)
+const follow = atom({ plugin: 'file-explorer', key: 'follow' } as const, true)
+const lastPrompt = atom({ plugin: 'file-explorer', key: 'lastPrompt' } as const, null)
 const previewOffset = atom({ plugin: 'file-explorer', key: 'previewOffset' } as const, 0)
 
 // The project's file list for name search, read once and dropped on refresh.
-const cache: { files?: string[] } = {}
+const cache: { files?: string[]; turnHead?: string } = {}
 
 // What the explorer was last drawn as, so presses know where a file shows.
-const layout = { isSplit: false, sidebarColumns: 0, listRows: 20, previewRows: 20, listTotal: 0, previewTotal: 0, icons: 'emoji' as IconStyle }
+const layout = { isSplit: false, sidebarColumns: 0, listRows: 20, previewRows: 20, listTotal: 0, previewTotal: 0, icons: 'emoji' as IconStyle, visible: { start: 0, end: 0 } }
 
 // VS Code's decoration colours, by the letter drawn at the row's end.
 const BADGE_COLOR: Record<string, string> = {
@@ -166,6 +168,38 @@ function parseNameStatus(raw: string): ExplorerChange[] {
   return out
 }
 
+// The working tree as a tree object, staged nothing: written through an
+// index of the explorer's own, so the person's index and stash are untouched.
+async function snapshotTree($: EngineInterface): Promise<string | undefined> {
+  const dir = await read($, root)
+  const where = await git($, ['rev-parse', '--git-path', 'file-explorer-index'])
+  if (where.exitCode !== 0) return undefined
+  const path = where.stdout.trim()
+  const index = path.startsWith('/') ? path : join(dir, path)
+  const env = { GIT_INDEX_FILE: index }
+  const inGit = (args: string[]) =>
+    $.process
+      .run(['git', ...args], { cwd: dir, env, timeoutMs: 20000 })
+      .catch(() => ({ exitCode: -1, stdout: '', stderr: '' }))
+  // Seeded from HEAD once; later snapshots reuse its stat cache and stay fast.
+  if (!(await $.fs.exists(index))) {
+    const head = await git($, ['rev-parse', '--verify', '-q', 'HEAD'])
+    if (head.exitCode === 0) await inGit(['read-tree', 'HEAD'])
+  }
+  if ((await inGit(['add', '-A'])).exitCode !== 0) return undefined
+  const tree = await inGit(['write-tree'])
+  return tree.exitCode === 0 ? tree.stdout.trim() : undefined
+}
+
+// What the base is diffed against: `head`, a fresh snapshot for a turn base,
+// or nothing (the working tree).
+async function baseHead($: EngineInterface): Promise<string | undefined> {
+  const now = await read($, base)
+  if (now.kind !== 'turn') return now.head
+  cache.turnHead = (await snapshotTree($)) ?? cache.turnHead
+  return cache.turnHead
+}
+
 async function baseRef($: EngineInterface): Promise<string> {
   const { ref } = await read($, base)
   if (ref !== 'HEAD') return ref
@@ -180,7 +214,7 @@ async function loadChanges($: EngineInterface) {
     await update($, changes, () => [])
     return
   }
-  const { head } = await read($, base)
+  const head = await baseHead($)
   const range = [await baseRef($), ...(head === undefined ? [] : [head])]
   const diff = await git($, ['diff', '--relative', '--name-status', '-z', '-M', ...range])
   if (diff.exitCode !== 0) {
@@ -236,7 +270,8 @@ function clipDiff(diff: string, limit: number): { text: string; isCut: boolean }
 }
 
 async function diffOf($: EngineInterface, change: ExplorerChange): Promise<{ diff: string; note: string }> {
-  const { head } = await read($, base)
+  const now = await read($, base)
+  const head = now.kind === 'turn' ? cache.turnHead : now.head
   const result =
     change.letter === 'U'
       ? await git($, ['diff', '--no-index', '--no-color', '--', '/dev/null', change.path])
@@ -272,11 +307,29 @@ async function defaultBranchBase($: EngineInterface): Promise<ExplorerBase | und
   return undefined
 }
 
+// HEAD → the last prompt → the default branch's merge-base → HEAD.
 async function cycleBase($: EngineInterface) {
-  if ((await read($, base)).ref !== 'HEAD') return setBase($, HEAD)
-  const branch = await defaultBranchBase($)
-  if (branch === undefined) $.ui.toast('No main or master branch to compare with')
-  else await setBase($, branch)
+  const now = await read($, base)
+  const turn = await read($, lastPrompt)
+  if (now.ref === 'HEAD' && now.head === undefined && turn !== null) return setBase($, turn)
+  if (now.kind === 'turn' || (now.ref === 'HEAD' && now.head === undefined)) {
+    const branch = await defaultBranchBase($)
+    if (branch !== undefined) return setBase($, branch)
+    if (now.kind !== 'turn') $.ui.toast('No main or master branch to compare with')
+  }
+  await setBase($, HEAD)
+}
+
+// Taken as each prompt is sent, so the changes a turn made can be shown alone.
+async function snapshotPrompt($: EngineInterface) {
+  const tree = await snapshotTree($)
+  if (tree === undefined) return
+  const at = new Date(await $.clock.now())
+  const time = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`
+  const turn: ExplorerBase = { ref: tree, label: `last prompt (${time})`, kind: 'turn' }
+  await update($, lastPrompt, () => turn)
+  cache.turnHead = tree
+  if ((await read($, base)).kind === 'turn') await update($, base, () => turn)
 }
 
 async function resolveCommit($: EngineInterface, name: string): Promise<string | undefined> {
@@ -287,6 +340,12 @@ async function resolveCommit($: EngineInterface, name: string): Promise<string |
 async function chooseBase($: EngineInterface, typed: string) {
   const name = typed.trim()
   if (name === '' || name === 'HEAD') return setBase($, HEAD)
+  if (name === 'turn' || name === 'prompt') {
+    const turn = await read($, lastPrompt)
+    if (turn === null) $.ui.toast('No prompt sent yet this session')
+    else await setBase($, turn)
+    return
+  }
   const range = /^(.+?)\.\.(\.?)(.+)$/.exec(name)
   if (range !== null) {
     const [, from = '', isThreeDot, to = ''] = range
@@ -432,7 +491,8 @@ const fileMode = (rel: string): ExplorerMode => (isMarkdown(rel) ? 'rendered' : 
 async function showPath($: EngineInterface, rel: string, options: { mode?: ExplorerMode; size?: number } = {}) {
   await update($, selected, () => rel)
   const change = (await read($, changes)).find(one => one.path === rel)
-  const isInRange = change !== undefined && (await read($, base)).head !== undefined
+  const now = await read($, base)
+  const isInRange = change !== undefined && now.head !== undefined && now.kind !== 'turn'
   const file =
     change?.letter === 'D'
       ? { text: '', note: 'deleted', isOnDisk: false }
@@ -503,12 +563,15 @@ async function quote($: EngineInterface, text: string, caption: string, language
 }
 
 async function quoteSelection($: EngineInterface, path: string) {
+  const shown = await read($, preview)
   const picked = await $.ui.selection()
   if (picked === undefined || picked.text.trim() === '') {
     $.ui.toast('Select lines with the mouse first, or quote a hunk')
     return
   }
-  await quote($, picked.text, `\`${path}\` (selected)`, '')
+  const lines = shown === null || shown.path !== path || shown.mode === 'diff' ? { start: 0, end: 0 } : await pickedLines($, shown)
+  const label = linesLabel(lines.start, lines.end)
+  await quote($, picked.text, `\`${path}\` ${label === '' ? '(selected)' : label}`, '')
 }
 
 // One `@@` block per hunk, so each can be drawn and quoted on its own.
@@ -625,6 +688,15 @@ function resolveLink(from: string, href: string): string | undefined {
   return parts.join('/')
 }
 
+// Opens every folder down to `dir`, so the tree shows where a file is.
+async function unfold($: EngineInterface, dir: string) {
+  const folders: string[] = []
+  for (let up = dir; up !== ''; up = parentOf(up)) folders.unshift(up)
+  for (const folder of folders) {
+    if (!(await read($, expanded)).includes(folder)) await toggleDir($, folder)
+  }
+}
+
 async function openLink($: EngineInterface, from: string, href: string) {
   const rel = resolveLink(from, href)
   if (rel === undefined) {
@@ -637,12 +709,7 @@ async function openLink($: EngineInterface, from: string, href: string) {
     $.ui.toast(`Not found: ${rel}`)
     return
   }
-  // Open every folder down to it, so the tree shows where it is.
-  const folders: string[] = []
-  for (let up = stat.kind === 'dir' ? rel : parentOf(rel); up !== ''; up = parentOf(up)) folders.unshift(up)
-  for (const folder of folders) {
-    if (!(await read($, expanded)).includes(folder)) await toggleDir($, folder)
-  }
+  await unfold($, stat.kind === 'dir' ? rel : parentOf(rel))
   await update($, view, () => 'files' as const)
   if (stat.kind === 'dir') {
     await update($, selected, () => rel)
@@ -690,6 +757,95 @@ function markdownWindow(lines: string[], from: number, room: number, width: numb
     ...(close === undefined || end >= lines.length ? [] : [(/^\s*(`{3,}|~{3,})/.exec(close)?.[1] ?? '```')]),
   ].join('\n')
   return { text, start, end }
+}
+
+// ---- following Claude ----------------------------------------------------
+
+const lineOf = (text: string, at: number) => (at < 0 ? 1 : text.slice(0, at).split('\n').length)
+
+// The rows before the hunk that holds new-side `line`, in drawPreview's
+// windowing (a hunk is its label row and its lines).
+function hunkOffset(diff: string, line: number): number {
+  let rows = 0
+  for (const hunk of splitHunks(diff)) {
+    const at = /\+(\d+)(?:,(\d+))?/.exec(hunk.header)
+    const start = Number(at?.[1] ?? 0)
+    const count = Number(at?.[2] ?? 1)
+    if (line < start + Math.max(1, count)) return rows
+    rows += hunk.body.replace(/\n$/, '').split('\n').length
+  }
+  return 0
+}
+
+// Shows in the preview what Claude just read or wrote: the file at the lines
+// it read, or the diff at the hunk it edited. Split view only, so it never
+// opens a pane over the person's work.
+async function followTool($: EngineInterface, tool: string, args: Record<string, unknown>) {
+  if (!layout.isSplit || !(await read($, follow))) return
+  if (!(await $.ui.panes()).some(pane => pane.id === EXPLORER && pane.isShown)) return
+  const filePath = args.file_path ?? args.notebook_path
+  if (typeof filePath !== 'string') return
+  const dir = await read($, root)
+  const normal = filePath.replace(/\\/g, '/')
+  if (!normal.startsWith(`${dir}/`)) return
+  const rel = normal.slice(dir.length + 1)
+  if ((await read($, view)) === 'files') await unfold($, parentOf(rel))
+
+  if (tool === 'Read') {
+    await showPath($, rel, { mode: 'file' })
+    const from = typeof args.offset === 'number' ? args.offset : 1
+    await update($, previewOffset, () => Math.max(0, from - 1))
+    return
+  }
+  await loadChanges($)
+  const edits = Array.isArray(args.edits) ? (args.edits as { new_string?: unknown }[]) : []
+  const written = typeof args.new_string === 'string' ? args.new_string : edits[0]?.new_string
+  const text = await $.fs.read(join(dir, rel)).catch(() => '')
+  const line = typeof written === 'string' && written !== '' ? lineOf(text, text.indexOf(written)) : 1
+  const isChanged = (await read($, changes)).some(one => one.path === rel)
+  await showPath($, rel, { mode: isChanged ? 'diff' : 'file' })
+  const shown = await read($, preview)
+  const offset = shown?.mode === 'diff' ? hunkOffset(shown.diff, line) : Math.max(0, line - 4)
+  await update($, previewOffset, () => offset)
+}
+
+// The lines a reference names: the mouse selection's (by the gutter's
+// numbers, else found in the file), else the lines the preview shows.
+async function pickedLines($: EngineInterface, shown: ExplorerPreview): Promise<{ start: number; end: number; text?: string }> {
+  const picked = await $.ui.selection()
+  const text = picked?.text ?? ''
+  if (text.trim() !== '') {
+    const rows = text.split('\n').filter(row => row.trim() !== '')
+    const numbers = rows.map(row => /^\s*(\d+)[\s│|:]/.exec(row)?.[1]).filter((n): n is string => n !== undefined)
+    if (numbers.length === rows.length && numbers.length > 0) {
+      const values = numbers.map(Number)
+      return { start: Math.min(...values), end: Math.max(...values), text }
+    }
+    const lines = shown.text.split('\n')
+    const first = (rows[0] ?? '').trim()
+    const near = layout.visible.start
+    let at = -1
+    for (let i = 0; i < lines.length; i++) {
+      if ((lines[i] ?? '').trim() === first && (at < 0 || Math.abs(i + 1 - near) < Math.abs(at + 1 - near))) at = i
+    }
+    if (at >= 0) return { start: at + 1, end: at + rows.length, text }
+    return { start: 0, end: 0, text }
+  }
+  return { ...layout.visible }
+}
+
+const linesLabel = (start: number, end: number) =>
+  start <= 0 ? '' : start === end ? `line ${start}` : `lines ${start}-${end}`
+
+// `@path (lines a-b)` into the prompt: the file attached, the lines named.
+async function referenceLines($: EngineInterface, shown: ExplorerPreview) {
+  const { start, end } = await pickedLines($, shown)
+  const label = linesLabel(start, end)
+  const { text, cursor } = await $.prompt.read()
+  const before = text.slice(0, cursor)
+  const lead = before === '' || /\s$/.test(before) ? '' : ' '
+  const filled = await $.prompt.fill({ text: `${lead}@${shown.path}${label === '' ? '' : ` (${label})`} `, mode: 'insert' })
+  if (!filled.isFilled) $.ui.toast(`Could not insert @${shown.path}`)
 }
 
 // ---- drawing -------------------------------------------------------------
@@ -951,8 +1107,12 @@ async function drawSidebar(
   return (
     <Box flexDirection="column" width={rows === undefined ? undefined : width}>
       <Box flexDirection="row" justifyContent="space-between">
-        <Text bold>{fit(baseName(dir).toUpperCase() || dir, width - 8)}</Text>
+        <Text bold>{fit(baseName(dir).toUpperCase() || dir, width - (rows === undefined ? 8 : 16))}</Text>
         <Box flexDirection="row" gap={1}>
+          {rows !== undefined && (
+            <Button key="follow" label="follow" plain dimColor={(await read($, follow)) ? undefined : true}
+              onPress={() => update($, follow, now => !now)} />
+          )}
           <Button key="refresh" label="↻" plain onPress={() => refreshAll($)} />
           {current === 'files' && <Button key="collapse" label="⊟" plain onPress={() => update($, expanded, () => [])} />}
           <Button
@@ -1057,11 +1217,13 @@ async function drawPreview(
 
   const body: RenderElement[] = []
   let shownEnd = Math.min(total, offset + room)
+  layout.visible = shown.mode === 'file' ? { start: offset + 1, end: shownEnd } : { start: 0, end: 0 }
   if (shown.mode === 'rendered' && fileLines.length > 0) {
     const part = rows === undefined
       ? { text: fileLines.join('\n'), start: 0, end: fileLines.length }
       : markdownWindow(fileLines, offset, room, width)
     shownEnd = part.end
+    layout.visible = { start: part.start + 1, end: part.end }
     // Headings drawn by hand, since a terminal has one size of type: H1 a
     // full-width band, H2 a coloured title over a rule, H3 a marked title.
     // Fenced code is framed, its language set into the top edge.
@@ -1147,6 +1309,13 @@ async function drawPreview(
       skip = Math.max(0, skip - size)
       return
     }
+    // The first hunk in view names the lines a reference without a
+    // selection points at.
+    if (layout.visible.start === 0) {
+      const at = /\+(\d+)(?:,(\d+))?/.exec(hunk.header)
+      const start = Number(at?.[1] ?? 0)
+      layout.visible = { start, end: start + Math.max(1, Number(at?.[2] ?? 1)) - 1 }
+    }
     // Row 0 of a hunk is its label; the rest are its body lines.
     if (skip === 0) {
       body.push(
@@ -1185,6 +1354,7 @@ async function drawPreview(
           {list.length > 0 && <Button key="prev" label="‹" plain hotkey="p" onPress={() => step(-1)} />}
           {list.length > 0 && <Button key="next" label="›" plain hotkey="n" onPress={() => step(1)} />}
           <Button key="quote" label="❝" plain hotkey="q" onPress={() => quoteSelection($, shown.path)} />
+          <Button key="ref" label="#" plain hotkey="r" onPress={() => referenceLines($, shown)} />
           {isOwnPane && <Button key="mention" label="@" plain onPress={() => mention($, shown.path)} />}
           {isOwnPane && (
             <Button key="close" label="✕" plain role="dismiss" onPress={() => $.ui.close({ id: PREVIEW })} />
@@ -1241,7 +1411,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'changes',
       description: 'Browse git changes against a ref or a range (HEAD by default)',
-      argumentHint: '[ref | a..b]',
+      argumentHint: '[ref | a..b | turn]',
     })
     if ((await read($, root)) !== e.cwd) {
       await update($, root, () => e.cwd)
@@ -1281,9 +1451,19 @@ export const register: Register = (on, options) => {
     }
   })
 
+  // Each prompt snapshots the working tree, for the last-prompt base.
+  on('prompt.submit', async ($, e, next) => {
+    await snapshotPrompt($).catch(() => undefined)
+    return next(e)
+  })
+
   on('tool.call', async ($, e, next) => {
     const ran = await next(e)
     const tool = String(e.tool)
+    const isError = (ran as { isError?: unknown }).isError === true
+    if (!isError && (tool === 'Read' || EDITING_TOOLS.has(tool))) {
+      await followTool($, tool, e as unknown as Record<string, unknown>).catch(() => undefined)
+    }
     if (!EDITING_TOOLS.has(tool) && tool !== 'Bash') return ran
 
     const args = e as { file_path?: unknown; notebook_path?: unknown }
