@@ -7,10 +7,13 @@ import type {
   ExplorerCommit,
   ExplorerEntry,
   ExplorerMode,
+  ExplorerHit,
+  ExplorerSearch,
   ExplorerPreview,
   ExplorerView,
 } from '../types'
 import { iconFor, iconWidth } from './icons'
+import { excerpt, fuzzyFilter, matchSpan, parseGrep } from './search'
 import type { IconStyle } from './icons'
 
 const EXPLORER = 'file-explorer'
@@ -26,6 +29,9 @@ const MAX_COMMITS = 100
 const SPLIT_MIN_COLUMNS = 80
 const SPLIT_COLUMNS = 110
 const WHEEL_ROWS = 3
+const MAX_FILE_RESULTS = 300
+const MAX_HITS = 500
+const MAX_INDEX = 200000
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
 const HEAD: ExplorerBase = { ref: 'HEAD', label: 'HEAD' }
 
@@ -40,8 +46,21 @@ const gitError = atom({ plugin: 'file-explorer', key: 'gitError' } as const, '')
 const touched = atom({ plugin: 'file-explorer', key: 'touched' } as const, [])
 const selected = atom({ plugin: 'file-explorer', key: 'selected' } as const, '')
 const preview = atom({ plugin: 'file-explorer', key: 'preview' } as const, null)
+const NO_SEARCH: ExplorerSearch = {
+  mode: 'files',
+  query: '',
+  isRegex: false,
+  isCaseSensitive: false,
+  files: [],
+  hits: [],
+  note: '',
+}
+const search = atom({ plugin: 'file-explorer', key: 'search' } as const, NO_SEARCH)
 const listOffset = atom({ plugin: 'file-explorer', key: 'listOffset' } as const, 0)
 const previewOffset = atom({ plugin: 'file-explorer', key: 'previewOffset' } as const, 0)
+
+// The project's file list for name search, read once and dropped on refresh.
+const cache: { files?: string[] } = {}
 
 // What the explorer was last drawn as, so presses know where a file shows.
 const layout = { isSplit: false, sidebarColumns: 0, listRows: 20, previewRows: 20, listTotal: 0, previewTotal: 0, icons: 'emoji' as IconStyle }
@@ -310,6 +329,82 @@ async function openCommit($: EngineInterface, commit: ExplorerCommit) {
   await update($, view, () => 'changes' as const)
 }
 
+// ---- search --------------------------------------------------------------
+
+async function run($: EngineInterface, argv: string[]) {
+  const cwd = await read($, root)
+  return $.process
+    .run(argv, { cwd, timeoutMs: 20000 })
+    .catch(() => ({ exitCode: -1, stdout: '', stderr: `${argv[0]} could not run` }))
+}
+
+// Files as ripgrep lists them (ignore files honoured, hidden ones kept but
+// .git), else as git does, untracked included.
+async function fileIndex($: EngineInterface): Promise<string[]> {
+  if (cache.files !== undefined) return cache.files
+  const listed = await run($, ['rg', '--files', '--hidden', '--glob', '!.git', '--null'])
+  const raw =
+    listed.exitCode === 0
+      ? listed.stdout
+      : (await git($, ['ls-files', '-z', '--cached', '--others', '--exclude-standard'])).stdout
+  cache.files = raw.split('\0').filter(path => path !== '').slice(0, MAX_INDEX)
+  return cache.files
+}
+
+async function searchFiles($: EngineInterface, query: string) {
+  const files = query.trim() === '' ? [] : fuzzyFilter(await fileIndex($), query, MAX_FILE_RESULTS)
+  const note = query.trim() === '' ? '' : files.length === 0 ? 'No files match.' : `${files.length}${files.length >= MAX_FILE_RESULTS ? '+' : ''} files`
+  await update($, search, now => ({ ...now, mode: 'files' as const, query, files, note }))
+  await update($, listOffset, () => 0)
+}
+
+async function searchText($: EngineInterface, query: string) {
+  const now = await read($, search)
+  if (query.trim() === '') {
+    await update($, search, was => ({ ...was, mode: 'text' as const, query, hits: [], note: '' }))
+    return
+  }
+  await update($, search, was => ({ ...was, mode: 'text' as const, query, note: 'Searching…' }))
+  const flags = now.isCaseSensitive ? ['--case-sensitive'] : ['--ignore-case']
+  let result = await run($, [
+    'rg', '--null', '--line-number', '--column', '--no-heading', '--color', 'never',
+    '--max-columns', '400', '--max-columns-preview', '--max-count', '100',
+    '--hidden', '--glob', '!.git', ...flags, ...(now.isRegex ? [] : ['--fixed-strings']), '-e', query,
+  ])
+  let tool = 'rg'
+  if (result.exitCode !== 0 && result.exitCode !== 1) {
+    tool = 'git grep'
+    result = await git($, [
+      'grep', '-z', '-n', '--column', '-I', '--untracked',
+      ...(now.isCaseSensitive ? [] : ['-i']), now.isRegex ? '-E' : '-F', '-e', query,
+    ])
+  }
+  if (result.exitCode !== 0 && result.exitCode !== 1) {
+    const reason = result.stderr.trim().split('\n')[0] ?? ''
+    await update($, search, was => ({ ...was, hits: [], note: fit(`${tool} failed: ${reason}`, 200) }))
+    return
+  }
+  const hits = parseGrep(result.stdout, MAX_HITS)
+  const files = new Set(hits.map(hit => hit.path)).size
+  const note =
+    hits.length === 0
+      ? 'No matches.'
+      : `${hits.length}${hits.length >= MAX_HITS ? '+' : ''} matches in ${files} file${files === 1 ? '' : 's'}`
+  await update($, search, was => ({ ...was, hits, note }))
+  await update($, listOffset, () => 0)
+}
+
+async function toggleSearchFlag($: EngineInterface, flag: 'isRegex' | 'isCaseSensitive') {
+  await update($, search, now => ({ ...now, [flag]: !now[flag] }))
+  const now = await read($, search)
+  if (now.mode === 'text' && now.query.trim() !== '') await searchText($, now.query)
+}
+
+async function openHit($: EngineInterface, hit: ExplorerHit) {
+  await showPath($, hit.path, { mode: 'file' })
+  await update($, previewOffset, () => Math.max(0, hit.line - 4))
+}
+
 // ---- preview -------------------------------------------------------------
 
 async function fileText($: EngineInterface, rel: string, size: number | undefined) {
@@ -457,13 +552,14 @@ async function refreshAll($: EngineInterface) {
     if (await loadDir($, rel)) kept.push(rel)
   }
   await update($, expanded, () => kept)
+  cache.files = undefined
   await loadChanges($)
   await loadHistory($)
   await reloadPreview($)
 }
 
 async function openExplorer($: EngineInterface, wanted: string) {
-  if (wanted === 'files' || wanted === 'changes' || wanted === 'history') await update($, view, () => wanted as ExplorerView)
+  if (wanted === 'files' || wanted === 'changes' || wanted === 'history' || wanted === 'search') await update($, view, () => wanted as ExplorerView)
   await refreshAll($)
   return $.ui.open({ id: EXPLORER, title: 'Explorer', focus: true, columns: SPLIT_COLUMNS })
 }
@@ -602,6 +698,57 @@ type InputElement = ElementTable<'terminal'>['Input'] | undefined
 
 const clamp = (value: number, low: number, high: number) => Math.max(low, Math.min(high, value))
 
+// The search tab's mode row, query field and status line.
+async function drawSearchControls(
+  $: EngineInterface,
+  els: Elements,
+  Input: InputElement,
+  width: number,
+): Promise<RenderElement> {
+  const { Box, Text, Button } = els
+  const found = await read($, search)
+  const isText = found.mode === 'text'
+  const setMode = (mode: 'files' | 'text') => async () => {
+    await update($, search, now => ({ ...now, mode }))
+    const now = await read($, search)
+    if (mode === 'files') await searchFiles($, now.query)
+    else if (now.hits.length === 0) await searchText($, now.query)
+  }
+  return (
+    <Box flexDirection="column">
+      <Box flexDirection="row" gap={1}>
+        <Button key="search:files" label="Name" plain dimColor={isText ? true : undefined} onPress={setMode('files')} />
+        <Button key="search:text" label="Text" plain dimColor={isText ? undefined : true} onPress={setMode('text')} />
+        {isText && (
+          <Button key="search:case" label="Aa" plain dimColor={found.isCaseSensitive ? undefined : true}
+            onPress={() => toggleSearchFlag($, 'isCaseSensitive')} />
+        )}
+        {isText && (
+          <Button key="search:regex" label=".*" plain dimColor={found.isRegex ? undefined : true}
+            onPress={() => toggleSearchFlag($, 'isRegex')} />
+        )}
+      </Box>
+      {Input !== undefined && (
+        <Input
+          key="search-input"
+          placeholder={isText ? 'text in files (Enter)' : 'file name'}
+          autoFocus
+          onInput={(value: string) =>
+            isText ? update($, search, now => ({ ...now, query: value })) : searchFiles($, value)
+          }
+          onSubmit={async (value: string) => {
+            if (isText) return searchText($, value)
+            await searchFiles($, value)
+            const first = (await read($, search)).files[0]
+            if (first !== undefined) await showPath($, first, { mode: fileMode(first) })
+          }}
+        />
+      )}
+      <Text dimColor>{fit(found.note || (isText ? 'ripgrep, ignore files honoured' : 'fuzzy, as you type'), width)}</Text>
+    </Box>
+  )
+}
+
 // The tree, the changes or the history; `rows` bounds the list to a window
 // of its own (split view), absent draws it whole for the pane to scroll.
 async function drawSidebar(
@@ -623,7 +770,70 @@ async function drawSidebar(
   let fixed = 2
   const extra: RenderElement[] = []
 
-  if (current === 'history') {
+  if (current === 'search') {
+    const found = await read($, search)
+    fixed += 3
+    if (Input === undefined) extra.push(<Text dimColor>Search needs a surface with text input.</Text>)
+    if (found.mode === 'files') {
+      lines = found.files.map(path => {
+        const icon = iconFor(baseName(path), false, false, layout.icons)
+        const room = width - 2 - iconWidth(icon, layout.icons)
+        const label = fit(baseName(path), room)
+        const rest = room - label.length - 1
+        return {
+          key: path,
+          node: (
+            <Box key={`line:${path}`} flexDirection="row">
+              <Text color="blue">{path === chosen ? '▌' : ' '}</Text>
+              {icon.glyph !== '' && <Text color={icon.color}>{icon.glyph}</Text>}
+              <Button key={`found:${path}`} label={label} plain onPress={() => showPath($, path, { mode: fileMode(path) })} />
+              {parentOf(path) !== '' && rest > 3 && <Text dimColor> {fit(parentOf(path), rest)}</Text>}
+            </Box>
+          ),
+        }
+      })
+    } else {
+      let lastPath = ''
+      const counts = new Map<string, number>()
+      for (const hit of found.hits) counts.set(hit.path, (counts.get(hit.path) ?? 0) + 1)
+      for (const hit of found.hits) {
+        if (hit.path !== lastPath) {
+          lastPath = hit.path
+          const icon = iconFor(baseName(hit.path), false, false, layout.icons)
+          const count = ` ${counts.get(hit.path) ?? 0}`
+          const room = width - 1 - iconWidth(icon, layout.icons) - count.length
+          lines.push({
+            key: `file:${hit.path}`,
+            node: (
+              <Box key={`hits:${hit.path}`} flexDirection="row">
+                <Text color="blue">{hit.path === chosen ? '▌' : ' '}</Text>
+                {icon.glyph !== '' && <Text color={icon.color}>{icon.glyph}</Text>}
+                <Button key={`hitfile:${hit.path}`} label={fit(hit.path, room)} plain onPress={() => openHit($, hit)} />
+                <Box flexGrow={1} />
+                <Text dimColor>{count}</Text>
+              </Box>
+            ),
+          })
+        }
+        const number = String(hit.line)
+        const room = width - 4 - number.length
+        const span = matchSpan(hit.text, found.query, found)
+        const piece = excerpt(hit.text, span, room)
+        lines.push({
+          key: `${hit.path}:${hit.line}:${hit.column}`,
+          node: (
+            <Box key={`hitline:${hit.path}:${hit.line}:${hit.column}`} flexDirection="row">
+              <Text>{'   '}</Text>
+              <Button key={`hit:${hit.path}:${hit.line}:${hit.column}`} label={number} plain dimColor onPress={() => openHit($, hit)} />
+              <Text> {piece.before}</Text>
+              <Text color="black" backgroundColor="yellow">{piece.hit}</Text>
+              <Text>{piece.after}</Text>
+            </Box>
+          ),
+        })
+      }
+    }
+  } else if (current === 'history') {
     const commits = await read($, history)
     if (commits.length === 0) extra.push(<Text dimColor>No commits.</Text>)
     lines = commits.map(commit => {
@@ -757,11 +967,15 @@ async function drawSidebar(
         <Box flexDirection="row" gap={1}>
           <Button key="tab:files" label="Files" plain hotkey="f" dimColor={current === 'files' ? undefined : true}
             onPress={() => update($, view, () => 'files' as const)} />
-          <Button key="tab:changes" label={`Changes ${list.length}`} plain hotkey="c"
+          <Button key="tab:changes" label={`${width < 40 ? 'Chg' : 'Changes'} ${list.length}`} plain hotkey="c"
             dimColor={current === 'changes' ? undefined : true}
             onPress={() => update($, view, () => 'changes' as const)} />
-          <Button key="tab:history" label="History" plain hotkey="h" dimColor={current === 'history' ? undefined : true}
+          <Button key="tab:history" label={width < 40 ? 'Log' : 'History'} plain hotkey="h"
+            dimColor={current === 'history' ? undefined : true}
             onPress={() => update($, view, () => 'history' as const)} />
+          <Button key="tab:search" label={width < 40 ? 'Find' : 'Search'} plain hotkey="s"
+            dimColor={current === 'search' ? undefined : true}
+            onPress={() => update($, view, () => 'search' as const)} />
         </Box>
         {isOver && (
           <Box flexDirection="row">
@@ -779,6 +993,7 @@ async function drawSidebar(
       {current === 'changes' && Input !== undefined && (
         <Input key="base-ref" placeholder="ref or a..b (empty = HEAD)" onSubmit={(value: string) => chooseBase($, value)} />
       )}
+      {current === 'search' && (await drawSearchControls($, els, Input, width))}
       {extra}
       {lines.slice(offset, offset + room).map(line => line.node)}
     </Box>
@@ -954,7 +1169,12 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'files',
       description: 'Open the file explorer',
-      argumentHint: '[files|changes|history]',
+      argumentHint: '[files|changes|history|search]',
+    })
+    await $.command.register({
+      name: 'search',
+      description: 'Search file contents with ripgrep, shown in the explorer',
+      argumentHint: '[text]',
     })
     await $.command.register({
       name: 'changes',
@@ -976,6 +1196,15 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'files' }, async ($, e) => {
     const opened = await openExplorer($, e.args.trim())
     return { text: opened.isPlaced ? 'Explorer opened.' : `Explorer not shown: ${opened.reason}` }
+  })
+
+  on('command.run', { command: 'search' }, async ($, e) => {
+    const query = e.args.trim()
+    if (query !== '') await searchText($, query)
+    else await update($, search, now => ({ ...now, mode: 'text' as const }))
+    const opened = await openExplorer($, 'search')
+    const { note } = await read($, search)
+    return { text: opened.isPlaced ? note || 'Search opened.' : `Explorer not shown: ${opened.reason}` }
   })
 
   on('command.run', { command: 'changes' }, async ($, e) => {

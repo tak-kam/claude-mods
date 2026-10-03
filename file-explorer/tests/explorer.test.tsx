@@ -250,3 +250,56 @@ test('previews markdown rendered and follows its relative links', async ($, on) 
   expect((await ui.find({ type: 'Code' }))?.props.path).toBe('src/main.ts')
   expect(await ui.find({ key: 'row:src/main.ts' })).toBeDefined()
 })
+
+test('finds files by name and text with ripgrep', async ($, on) => {
+  const long = Array.from({ length: 80 }, (_, i) => (i === 59 ? 'const needle = 1' : `line ${i + 1}`)).join('\n') + '\n'
+  const ran: string[][] = []
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('fs.list', async (_$, e) => ({
+    value: (TREE[e.path] ?? []).map(one => ({ ...one, mtimeMs: 0, isLink: false })),
+  }))
+  on('fs.read', async () => ({ value: long }))
+  on('fs.stat', async () => ({ value: { kind: 'file' as const, size: 30, mtimeMs: 0, isLink: false } }))
+  on('process.run', async (_$, e) => {
+    if (e.argv[0] !== 'rg') return fakeGit(e.argv, [])
+    ran.push([...e.argv])
+    if (e.argv[1] === '--files') return ok('README.md\0src/main.ts\0src/util.ts\0docs/main-notes.md\0')
+    return ok('src/main.ts\x0060:7:const needle = 1\nsrc/util.ts\x003:1:needle()\n')
+  })
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+  on('ui.panes', async () => ({ value: [] }))
+
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE('file-explorer', 120))
+  await ui.press({ key: 'tab:search' })
+
+  // Name search filters as you type, best match first.
+  await ui.input({ key: 'search-input', text: 'mt', kind: 'change' })
+  const found = (await ui.findAll({ type: 'Button' })).filter(one => one.key?.startsWith('found:'))
+  expect(found[0]?.key).toBe('found:src/main.ts')
+  expect(found.some(one => one.key === 'found:README.md')).toBe(false)
+
+  // Text search runs rg on Enter, groups by file and highlights the hit.
+  await ui.press({ key: 'search:text' })
+  await ui.input({ key: 'search-input', text: 'needle' })
+  const args = ran.find(argv => argv.includes('needle')) ?? []
+  expect(args).toContain('--fixed-strings')
+  expect(args).toContain('--ignore-case')
+  expect(await ui.find({ key: 'hitfile:src/main.ts' })).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: 'needle' }))?.props.backgroundColor).toBe('yellow')
+  expect(await ui.find({ type: 'Text', text: '2 matches in 2 files' })).toBeDefined()
+
+  // A hit opens its file scrolled to the line.
+  await ui.press({ key: 'hit:src/main.ts:60:7' })
+  const code = await ui.find({ type: 'Code' })
+  expect(code?.props.path).toBe('src/main.ts')
+  expect(Number(code?.props.startLine)).toBeGreaterThan(50)
+
+  // Regex and case toggles re-run the search with their flags.
+  await ui.press({ key: 'search:regex' })
+  await ui.press({ key: 'search:case' })
+  const last = ran[ran.length - 1] ?? []
+  expect(last).not.toContain('--fixed-strings')
+  expect(last).toContain('--case-sensitive')
+})

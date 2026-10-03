@@ -1,6 +1,19 @@
 export type ExplorerEntry = { name: string; isDir: boolean; size: number }
 
-export type ExplorerView = 'files' | 'changes' | 'history'
+export type ExplorerView = 'files' | 'changes' | 'history' | 'search'
+
+export type ExplorerHit = { path: string; line: number; column: number; text: string }
+
+// File-name search filters as you type; text search runs rg on Enter.
+export type ExplorerSearch = {
+  mode: 'files' | 'text'
+  query: string
+  isRegex: boolean
+  isCaseSensitive: boolean
+  files: string[]
+  hits: ExplorerHit[]
+  note: string
+}
 
 export type ExplorerChange = {
   path: string
@@ -51,6 +64,7 @@ declare module 'claude-code' {
       selected: string
       preview: ExplorerPreview | null
       listOffset: number
+      search: ExplorerSearch
       previewOffset: number
     }
   }
