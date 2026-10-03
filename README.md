@@ -46,7 +46,7 @@ claude --plugin-dir ./file-explorer
 - Icon style is the `icons` option in `/config`: `emoji` (default, any terminal), `nerd` (needs a Nerd Font; coloured like VS Code), or `ascii`
 - Explorer: `f` Files, `c` Changes, `h` History, `s` Search
 - Search: **Name** filters file names as you type (fuzzy, like quick open; Enter opens the best match); **Text** runs ripgrep on Enter (`git grep` without it), grouped by file with the hit highlighted, `Aa` for case and `.*` for regex; a hit opens its file at that line
-- Markdown files open rendered (`m` Preview, `o` Source); a relative link in the preview opens its file in the explorer
+- Markdown files open rendered (`m` Preview, `o` Source): H1 as a full-width band, H2 over a rule, H3 marked, since a terminal has one type size; a relative link opens its file in the explorer
 - Preview: `o` / `d` file or diff, `j` / `k` scroll, `n` / `p` next or previous change, `q` quotes the mouse selection, `❝ quote` quotes a hunk, `@` inserts `@path`
 
 Opened at start, the pane docks beside the transcript in fullscreen mode at 144 columns or wider; `/files` opens it at any width.

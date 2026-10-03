@@ -14,6 +14,7 @@ import type {
 } from '../types'
 import { iconFor, iconWidth } from './icons'
 import { excerpt, fuzzyFilter, matchSpan, parseGrep } from './search'
+import { cellWidth, fitCells, splitHeadings } from './markdown'
 import type { IconStyle } from './icons'
 
 const EXPLORER = 'file-explorer'
@@ -1053,19 +1054,50 @@ async function drawPreview(
       ? { text: fileLines.join('\n'), start: 0, end: fileLines.length }
       : markdownWindow(fileLines, offset, room, width)
     shownEnd = part.end
-    const links = localLinks(part.text)
-    body.push(
-      links.length > 0 ? (
-        <Markdown
-          key="md"
-          text={part.text}
-          pressableLinks={links}
-          onLinkPress={link => openLink($, shown.path, link.href)}
-        />
-      ) : (
-        <Markdown key="md" text={part.text} />
-      ),
-    )
+    // Headings drawn by hand, since a terminal has one size of type: H1 a
+    // full-width band, H2 a coloured title over a rule, H3 a marked title.
+    splitHeadings(part.text).forEach((piece, i) => {
+      if (piece.kind === 'heading') {
+        const top = i === 0 ? 0 : 1
+        if (piece.level === 1) {
+          body.push(
+            <Box key={`h:${i}`} marginTop={top}>
+              <Text bold color="black" backgroundColor="cyan">{fitCells(` ${piece.text}`, Math.max(4, width - 1))}</Text>
+            </Box>,
+          )
+        } else if (piece.level === 2) {
+          body.push(
+            <Box key={`h:${i}`} flexDirection="column" marginTop={top}>
+              <Text bold color="cyan">{fitCells(piece.text, Math.max(4, width - 1)).trimEnd()}</Text>
+              <Text color="cyan" dimColor>{'─'.repeat(Math.max(4, Math.min(width - 1, cellWidth(piece.text) + 2)))}</Text>
+            </Box>,
+          )
+        } else {
+          body.push(
+            <Box key={`h:${i}`} marginTop={top}>
+              <Text color={piece.level === 3 ? 'blue' : undefined} bold>{piece.level === 3 ? '▍' : ''}</Text>
+              <Text bold dimColor={piece.level >= 5 ? true : undefined}>
+                {fitCells(piece.text, Math.max(4, width - 2)).trimEnd()}
+              </Text>
+            </Box>,
+          )
+        }
+        return
+      }
+      const links = localLinks(piece.text)
+      body.push(
+        links.length > 0 ? (
+          <Markdown
+            key={`md:${i}`}
+            text={piece.text}
+            pressableLinks={links}
+            onLinkPress={link => openLink($, shown.path, link.href)}
+          />
+        ) : (
+          <Markdown key={`md:${i}`} text={piece.text} />
+        ),
+      )
+    })
   }
   if (shown.mode === 'file' && fileLines.length > 0) {
     body.push(
