@@ -1,7 +1,14 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { ExplorerBase, ExplorerChange, ExplorerEntry, ExplorerPreview, ExplorerView } from '../types'
+import type {
+  ExplorerBase,
+  ExplorerChange,
+  ExplorerCommit,
+  ExplorerEntry,
+  ExplorerPreview,
+  ExplorerView,
+} from '../types'
 
 const EXPLORER = 'file-explorer'
 const PREVIEW = 'file-preview'
@@ -11,6 +18,7 @@ const EDITING_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit'])
 const MAX_ROWS = 1500
 const MAX_PREVIEW_BYTES = 512 * 1024
 const MAX_CODE_CHARS = 10000
+const MAX_COMMITS = 100
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
 const HEAD: ExplorerBase = { ref: 'HEAD', label: 'HEAD' }
 
@@ -20,6 +28,7 @@ const base = atom({ plugin: 'file-explorer', key: 'base' } as const, HEAD)
 const expanded = atom({ plugin: 'file-explorer', key: 'expanded' } as const, [])
 const listings = atom({ plugin: 'file-explorer', key: 'listings' } as const, {})
 const changes = atom({ plugin: 'file-explorer', key: 'changes' } as const, [])
+const history = atom({ plugin: 'file-explorer', key: 'history' } as const, [])
 const gitError = atom({ plugin: 'file-explorer', key: 'gitError' } as const, '')
 const touched = atom({ plugin: 'file-explorer', key: 'touched' } as const, [])
 const selected = atom({ plugin: 'file-explorer', key: 'selected' } as const, '')
@@ -139,16 +148,20 @@ async function loadChanges($: EngineInterface) {
     await update($, changes, () => [])
     return
   }
-  const diff = await git($, ['diff', '--relative', '--name-status', '-z', '-M', await baseRef($)])
+  const { head } = await read($, base)
+  const range = [await baseRef($), ...(head === undefined ? [] : [head])]
+  const diff = await git($, ['diff', '--relative', '--name-status', '-z', '-M', ...range])
   if (diff.exitCode !== 0) {
     await update($, gitError, () => fit(diff.stderr.trim() || 'git diff failed', 200))
     await update($, changes, () => [])
     return
   }
   const found = parseNameStatus(diff.stdout)
-  const others = await git($, ['ls-files', '--others', '--exclude-standard', '-z'])
-  for (const path of others.stdout.split('\0')) {
-    if (path !== '') found.push({ path, letter: 'U' })
+  if (head === undefined) {
+    const others = await git($, ['ls-files', '--others', '--exclude-standard', '-z'])
+    for (const path of others.stdout.split('\0')) {
+      if (path !== '') found.push({ path, letter: 'U' })
+    }
   }
   found.sort((a, b) => a.path.localeCompare(b.path))
   await update($, gitError, () => '')
@@ -191,11 +204,14 @@ function clipDiff(diff: string, limit: number): { text: string; isCut: boolean }
 }
 
 async function diffOf($: EngineInterface, change: ExplorerChange): Promise<{ diff: string; note: string }> {
+  const { head } = await read($, base)
   const result =
     change.letter === 'U'
       ? await git($, ['diff', '--no-index', '--no-color', '--', '/dev/null', change.path])
       : await git($, [
-          'diff', '--relative', '--no-color', '-M', await baseRef($), '--',
+          'diff', '--relative', '--no-color', '-M', await baseRef($),
+          ...(head === undefined ? [] : [head]),
+          '--',
           ...(change.from === undefined ? [] : [change.from]),
           change.path,
         ])
@@ -231,12 +247,55 @@ async function cycleBase($: EngineInterface) {
   else await setBase($, branch)
 }
 
+async function resolveCommit($: EngineInterface, name: string): Promise<string | undefined> {
+  const found = await git($, ['rev-parse', '--verify', '-q', `${name}^{commit}`])
+  return found.exitCode === 0 ? found.stdout.trim() : undefined
+}
+
 async function chooseBase($: EngineInterface, typed: string) {
   const name = typed.trim()
   if (name === '' || name === 'HEAD') return setBase($, HEAD)
+  const range = /^(.+?)\.\.(\.?)(.+)$/.exec(name)
+  if (range !== null) {
+    const [, from = '', isThreeDot, to = ''] = range
+    const head = await resolveCommit($, to)
+    let ref = await resolveCommit($, from)
+    if (ref !== undefined && head !== undefined && isThreeDot === '.') {
+      const merge = await git($, ['merge-base', ref, head])
+      ref = merge.exitCode === 0 ? merge.stdout.trim() : undefined
+    }
+    if (ref === undefined || head === undefined) $.ui.toast(`Unknown range: ${name}`)
+    else await setBase($, { ref, head, label: name })
+    return
+  }
   const found = await git($, ['rev-parse', '--verify', '-q', `${name}^{commit}`])
   if (found.exitCode !== 0) $.ui.toast(`Unknown ref: ${name}`)
   else await setBase($, { ref: found.stdout.trim(), label: name })
+}
+
+// `git log` records, fields split by \x1f and records by \x1e.
+function parseLog(raw: string): ExplorerCommit[] {
+  return raw
+    .split('\x1e')
+    .map(record => record.replace(/^\n/, '').split('\x1f'))
+    .filter(fields => fields.length >= 5)
+    .map(([sha = '', short = '', subject = '', author = '', when = '']) => ({ sha, short, subject, author, when }))
+}
+
+async function loadHistory($: EngineInterface) {
+  const log = await git($, [
+    'log', `-n${MAX_COMMITS}`, '--no-color',
+    '--format=%H%x1f%h%x1f%s%x1f%an%x1f%ar%x1e',
+  ])
+  await update($, history, () => (log.exitCode === 0 ? parseLog(log.stdout) : []))
+}
+
+// A commit's own changes: its first parent (or the empty tree) against it.
+async function openCommit($: EngineInterface, commit: ExplorerCommit) {
+  const parent = await git($, ['rev-parse', '--verify', '-q', `${commit.sha}^`])
+  const ref = parent.exitCode === 0 ? parent.stdout.trim() : EMPTY_TREE
+  await setBase($, { ref, head: commit.sha, label: `${commit.short} ${commit.subject}` })
+  await update($, view, () => 'changes' as const)
 }
 
 // ---- preview -------------------------------------------------------------
@@ -260,8 +319,13 @@ async function fileText($: EngineInterface, rel: string, size: number | undefine
 async function showPath($: EngineInterface, rel: string, options: { mode?: 'file' | 'diff'; size?: number } = {}) {
   await update($, selected, () => rel)
   const change = (await read($, changes)).find(one => one.path === rel)
+  const isInRange = change !== undefined && (await read($, base)).head !== undefined
   const file =
-    change?.letter === 'D' ? { text: '', note: 'deleted', isOnDisk: false } : await fileText($, rel, options.size)
+    change?.letter === 'D'
+      ? { text: '', note: 'deleted', isOnDisk: false }
+      : isInRange
+        ? { text: '', note: '', isOnDisk: false }
+        : await fileText($, rel, options.size)
   const diff = change === undefined ? { diff: '', note: '' } : await diffOf($, change)
   const wanted = options.mode ?? (change === undefined ? 'file' : 'diff')
   const mode = change === undefined ? 'file' : file.isOnDisk ? wanted : 'diff'
@@ -293,6 +357,39 @@ async function mention($: EngineInterface, rel: string) {
   if (!filled.isFilled) $.ui.toast(`Could not insert @${rel}`)
 }
 
+async function quote($: EngineInterface, text: string, caption: string, language: string) {
+  const fence = text.includes('```') ? '````' : '```'
+  const { text: draft, cursor } = await $.prompt.read()
+  const lead = draft.slice(0, cursor).trim() === '' ? '' : '\n'
+  const block = `${lead}${caption}:\n${fence}${language}\n${text.trimEnd()}\n${fence}\n`
+  const filled = await $.prompt.fill({ text: block, mode: 'insert' })
+  if (!filled.isFilled) $.ui.toast('Could not quote into the prompt')
+}
+
+async function quoteSelection($: EngineInterface, path: string) {
+  const picked = await $.ui.selection()
+  if (picked === undefined || picked.text.trim() === '') {
+    $.ui.toast('Select lines with the mouse first, or quote a hunk')
+    return
+  }
+  await quote($, picked.text, `\`${path}\` (selected)`, '')
+}
+
+// One `@@` block per hunk, so each can be drawn and quoted on its own.
+function splitHunks(diff: string): { header: string; body: string; lines: string }[] {
+  return diff
+    .split(/\n(?=@@ )/)
+    .filter(hunk => hunk.startsWith('@@ '))
+    .map(hunk => {
+      const header = hunk.slice(0, hunk.indexOf('\n') < 0 ? hunk.length : hunk.indexOf('\n'))
+      const at = /\+(\d+)(?:,(\d+))?/.exec(header)
+      const start = Number(at?.[1] ?? 0)
+      const count = Number(at?.[2] ?? 1)
+      const lines = count <= 1 ? `line ${start}` : `lines ${start}-${start + count - 1}`
+      return { header, body: hunk.endsWith('\n') ? hunk : `${hunk}\n`, lines }
+    })
+}
+
 async function refreshAll($: EngineInterface) {
   const open = await read($, expanded)
   const kept: string[] = []
@@ -302,11 +399,12 @@ async function refreshAll($: EngineInterface) {
   }
   await update($, expanded, () => kept)
   await loadChanges($)
+  await loadHistory($)
   await reloadPreview($)
 }
 
 async function openExplorer($: EngineInterface, wanted: string) {
-  if (wanted === 'files' || wanted === 'changes') await update($, view, () => wanted as ExplorerView)
+  if (wanted === 'files' || wanted === 'changes' || wanted === 'history') await update($, view, () => wanted as ExplorerView)
   await refreshAll($)
   return $.ui.open({ id: EXPLORER, title: 'Explorer', focus: true })
 }
@@ -348,12 +446,12 @@ export const register: Register = on => {
     await $.command.register({
       name: 'files',
       description: 'Open the file explorer',
-      argumentHint: '[files|changes]',
+      argumentHint: '[files|changes|history]',
     })
     await $.command.register({
       name: 'changes',
-      description: 'Browse git changes against a base (HEAD by default)',
-      argumentHint: '[ref]',
+      description: 'Browse git changes against a ref or a range (HEAD by default)',
+      argumentHint: '[ref | a..b]',
     })
     if ((await read($, root)) !== e.cwd) {
       await update($, root, () => e.cwd)
@@ -456,9 +554,46 @@ export const register: Register = on => {
             variant={current === 'changes' ? 'primary' : 'secondary'}
             onPress={() => update($, view, () => 'changes' as const)}
           />
+          <Button
+            key="tab:history"
+            label="History"
+            hotkey="h"
+            variant={current === 'history' ? 'primary' : 'secondary'}
+            onPress={() => update($, view, () => 'history' as const)}
+          />
         </Box>
       </Box>
     )
+
+    if (current === 'history') {
+      const commits = await read($, history)
+      const against = await read($, base)
+      return (
+        <Box flexDirection="column">
+          {header}
+          {commits.length === 0 && <Text dimColor>No commits.</Text>}
+          {commits.map(commit => {
+            const isOpen = against.head === commit.sha
+            const room = width - commit.short.length - 3
+            return (
+              <Box key={`line:${commit.sha}`} flexDirection="column">
+                <Box flexDirection="row">
+                  <Text color="blue">{isOpen ? '▌' : ' '}</Text>
+                  <Text color="yellow">{commit.short} </Text>
+                  <Button
+                    key={`commit:${commit.sha}`}
+                    label={fit(commit.subject, room)}
+                    plain
+                    onPress={() => openCommit($, commit)}
+                  />
+                </Box>
+                <Text dimColor>{fit(`  ${commit.author} · ${commit.when}`, width)}</Text>
+              </Box>
+            )
+          })}
+        </Box>
+      )
+    }
 
     if (current === 'changes') {
       const against = await read($, base)
@@ -467,13 +602,13 @@ export const register: Register = on => {
         <Box flexDirection="column">
           {header}
           <Box flexDirection="row" gap={1}>
-            <Text dimColor>vs</Text>
+            <Text dimColor>{against.head === undefined ? 'vs' : 'in'}</Text>
             <Button key="base" label={fit(against.label, width - 6)} plain onPress={() => cycleBase($)} />
           </Box>
           {Input !== undefined && (
             <Input
               key="base-ref"
-              placeholder="compare with ref (empty = HEAD)"
+              placeholder="ref or a..b (empty = HEAD)"
               onSubmit={(value: string) => chooseBase($, value)}
             />
           )}
@@ -569,6 +704,7 @@ export const register: Register = on => {
           <Box flexDirection="row" gap={1}>
             {list.length > 0 && <Button key="prev" label="‹" plain hotkey="p" onPress={() => step(-1)} />}
             {list.length > 0 && <Button key="next" label="›" plain hotkey="n" onPress={() => step(1)} />}
+            <Button key="quote" label="❝" plain hotkey="q" onPress={() => quoteSelection($, shown.path)} />
             <Button key="mention" label="@" plain onPress={() => mention($, shown.path)} />
             <Button key="close" label="✕" plain role="dismiss" onPress={() => $.ui.close({ id: PREVIEW })} />
           </Box>
@@ -594,15 +730,28 @@ export const register: Register = on => {
             {change !== undefined && (
               <Text dimColor>
                 <Text color={BADGE_COLOR[change.letter] ?? 'yellow'}>{change.letter}</Text>
-                {` vs ${fit(against.label, width - 28)} · ${at + 1}/${list.length}`}
+                {` ${against.head === undefined ? 'vs' : 'in'} ${fit(against.label, width - 28)} · ${at + 1}/${list.length}`}
               </Text>
             )}
           </Box>
         )}
         {shown.note !== '' && <Text dimColor>{shown.note}</Text>}
-        {shown.mode === 'diff' && shown.diff !== '' && (
-          <Code source={shown.diff} format="diff" path={shown.path} wrap="truncate-end" />
-        )}
+        {shown.mode === 'diff' &&
+          splitHunks(shown.diff).map((hunk, i) => (
+            <Box key={`hunk:${i}`} flexDirection="column" marginTop={i === 0 ? 0 : 1}>
+              <Box flexDirection="row" justifyContent="space-between">
+                <Text dimColor>{fit(hunk.lines, width - 10)}</Text>
+                <Button
+                  key={`quote:${i}`}
+                  label="❝ quote"
+                  plain
+                  dimColor
+                  onPress={() => quote($, hunk.body, `\`${shown.path}\` ${hunk.lines} (diff ${against.head === undefined ? 'vs' : 'in'} ${against.label})`, 'diff')}
+                />
+              </Box>
+              <Code source={hunk.body} format="diff" path={shown.path} wrap="truncate-end" />
+            </Box>
+          ))}
         {shown.mode === 'file' && shown.text !== '' && (
           <Code source={shown.text} path={shown.path} startLine={1} wrap="truncate-end" />
         )}

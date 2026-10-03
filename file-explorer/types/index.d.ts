@@ -1,6 +1,6 @@
 export type ExplorerEntry = { name: string; isDir: boolean; size: number }
 
-export type ExplorerView = 'files' | 'changes'
+export type ExplorerView = 'files' | 'changes' | 'history'
 
 export type ExplorerChange = {
   path: string
@@ -8,9 +8,19 @@ export type ExplorerChange = {
   from?: string
 }
 
+// Changes are `ref` against the working tree, or against `head` when set.
 export type ExplorerBase = {
   ref: string
   label: string
+  head?: string
+}
+
+export type ExplorerCommit = {
+  sha: string
+  short: string
+  subject: string
+  author: string
+  when: string
 }
 
 export type ExplorerPreview = {
@@ -32,6 +42,7 @@ declare module 'claude-code' {
       expanded: string[]
       listings: Record<string, ExplorerEntry[]>
       changes: ExplorerChange[]
+      history: ExplorerCommit[]
       gitError: string
       touched: string[]
       selected: string

@@ -41,7 +41,13 @@ function fakeGit(argv: readonly string[], log: string[]) {
   if (line === 'rev-parse --is-inside-work-tree') return ok('true\n')
   if (line === 'rev-parse --verify -q HEAD') return ok('abc\n')
   if (line.startsWith('rev-parse --verify -q main^{commit}')) return ok('def\n')
+  if (line === 'rev-parse --verify -q aaaa^') return ok('p0\n')
+  if (line.startsWith('log ')) return ok('aaaa\x1faaa\x1fAdd new\x1fAlice\x1f2 days ago\x1e\n')
   if (line.startsWith('rev-parse --verify -q')) return ok('', 1)
+  if (line.startsWith('diff --relative --name-status') && args.includes('aaaa')) return ok('A\0src/new.ts\0')
+  if (line.startsWith('diff --relative --no-color') && args.includes('aaaa')) {
+    return ok('diff --git a/src/new.ts b/src/new.ts\n@@ -0,0 +1,2 @@\n+a\n+b\n')
+  }
   if (line.startsWith('diff --relative --name-status')) {
     return ok(args.includes('def') ? 'M\0src/main.ts\0D\0old.txt\0' : 'M\0src/main.ts\0')
   }
@@ -83,6 +89,7 @@ test('browses files and git changes with diffs', async ($, on) => {
   on('ui.open', async () => ({ value: { isPlaced: true as const } }))
   on('ui.panes', async () => ({ value: [] }))
   on('prompt.read', async () => ({ value: { text: 'look at', cursor: 7 } }))
+  on('ui.selection', async () => ({ value: { text: '+export const answer = 42' } }))
   on('prompt.fill', async (_$, e) => {
     filled = e.text
     return { isFilled: true as const, text: e.text }
@@ -124,4 +131,24 @@ test('browses files and git changes with diffs', async ($, on) => {
   await ui.press({ key: 'change:old.txt' })
   expect(await shown.find({ key: 'mode:file' })).toBeUndefined()
   expect(gitLog.some(line => line.includes('def -- old.txt'))).toBe(true)
+
+  // History: a commit opens as its own changes, diff only.
+  await ui.press({ key: 'tab:history' })
+  expect((await ui.find({ key: 'commit:aaaa' }))?.text).toBe('Add new')
+  await ui.press({ key: 'commit:aaaa' })
+  expect((await ui.find({ key: 'tab:changes' }))?.text).toBe('Changes 1')
+  expect((await ui.find({ key: 'base' }))?.text).toBe('aaa Add new')
+  await ui.press({ key: 'change:src/new.ts' })
+  expect(await shown.find({ key: 'mode:file' })).toBeUndefined()
+  expect(gitLog).toContain('diff --relative --no-color -M p0 aaaa -- src/new.ts')
+
+  // Quoting a hunk, then the mouse selection.
+  await shown.press({ key: 'quote:0' })
+  expect(filled).toBe('\n`src/new.ts` lines 1-2 (diff in aaa Add new):\n```diff\n@@ -0,0 +1,2 @@\n+a\n+b\n```\n')
+  await shown.press({ key: 'quote' })
+  expect(filled).toBe('\n`src/new.ts` (selected):\n```\n+export const answer = 42\n```\n')
+
+  // A range typed into the base field.
+  await ui.input({ key: 'base-ref', text: 'main..main' })
+  expect((await ui.find({ key: 'base' }))?.text).toBe('main..main')
 })
