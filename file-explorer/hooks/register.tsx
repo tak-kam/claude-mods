@@ -14,7 +14,7 @@ import type {
 } from '../types'
 import { iconFor, iconWidth } from './icons'
 import { excerpt, fuzzyFilter, matchSpan, parseGrep } from './search'
-import { cellWidth, fitCells, splitHeadings } from './markdown'
+import { cellWidth, fitCells, splitMarkdown } from './markdown'
 import type { IconStyle } from './icons'
 
 const EXPLORER = 'file-explorer'
@@ -1056,7 +1056,29 @@ async function drawPreview(
     shownEnd = part.end
     // Headings drawn by hand, since a terminal has one size of type: H1 a
     // full-width band, H2 a coloured title over a rule, H3 a marked title.
-    splitHeadings(part.text).forEach((piece, i) => {
+    // Fenced code is framed, its language set into the top edge.
+    splitMarkdown(part.text).forEach((piece, i) => {
+      if (piece.kind === 'code') {
+        body.push(
+          <Box key={`code:${i}`} borderStyle="round" borderColor="gray" paddingX={1} width={Math.max(8, width - 1)}>
+            {piece.language !== '' && (
+              <Box position="absolute" top={-1} left={1}>
+                <Text dimColor> {fit(piece.language, Math.max(1, width - 8))} </Text>
+              </Box>
+            )}
+            {piece.text === '' ? (
+              <Text> </Text>
+            ) : (
+              <Code
+                source={`${piece.text}\n`}
+                language={piece.language === '' ? undefined : piece.language}
+                wrap="truncate-end"
+              />
+            )}
+          </Box>,
+        )
+        return
+      }
       if (piece.kind === 'heading') {
         const top = i === 0 ? 0 : 1
         if (piece.level === 1) {

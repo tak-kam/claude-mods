@@ -1,30 +1,50 @@
-export type MarkdownPart = { kind: 'text'; text: string } | { kind: 'heading'; level: number; text: string }
+export type MarkdownPart =
+  | { kind: 'text'; text: string }
+  | { kind: 'heading'; level: number; text: string }
+  | { kind: 'code'; language: string; text: string }
 
-// ATX headings (`# Title`) outside fenced code, split from the text around
-// them so they can be drawn as bands and rules; the rest stays markdown.
-export function splitHeadings(markdown: string): MarkdownPart[] {
+// ATX headings (`# Title`) and fenced code split from the text around them,
+// so they can be drawn as bands and framed blocks; the rest stays markdown.
+// A fence left open runs to the end, as markdown reads it.
+export function splitMarkdown(markdown: string): MarkdownPart[] {
   const parts: MarkdownPart[] = []
   let chunk: string[] = []
+  let code: string[] = []
   let fence = ''
+  let language = ''
   const flush = () => {
     const text = chunk.join('\n')
     if (text.trim() !== '') parts.push({ kind: 'text', text: text.replace(/^\n+|\n+$/g, '') })
     chunk = []
   }
   for (const line of markdown.split('\n')) {
-    const mark = /^\s*(`{3,}|~{3,})/.exec(line)?.[1]
-    if (mark !== undefined) {
-      if (fence === '') fence = mark
-      else if (mark.charAt(0) === fence.charAt(0) && mark.length >= fence.length) fence = ''
-    }
-    const heading = fence === '' && mark === undefined ? /^ {0,3}(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/.exec(line) : null
-    if (heading === null) {
-      chunk.push(line)
+    const open = /^\s*(`{3,}|~{3,})\s*([^\s`]*)/.exec(line)
+    if (fence === '') {
+      if (open !== null) {
+        flush()
+        fence = open[1] ?? '```'
+        language = open[2] ?? ''
+        code = []
+        continue
+      }
+      const heading = /^ {0,3}(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/.exec(line)
+      if (heading === null) {
+        chunk.push(line)
+        continue
+      }
+      flush()
+      parts.push({ kind: 'heading', level: (heading[1] ?? '#').length, text: plainInline(heading[2] ?? '') })
       continue
     }
-    flush()
-    parts.push({ kind: 'heading', level: (heading[1] ?? '#').length, text: plainInline(heading[2] ?? '') })
+    const close = /^\s*(`{3,}|~{3,})\s*$/.exec(line)?.[1]
+    if (close !== undefined && close.charAt(0) === fence.charAt(0) && close.length >= fence.length) {
+      parts.push({ kind: 'code', language, text: code.join('\n') })
+      fence = ''
+      continue
+    }
+    code.push(line)
   }
+  if (fence !== '') parts.push({ kind: 'code', language, text: code.join('\n') })
   flush()
   return parts
 }
