@@ -284,6 +284,16 @@ test('finds files by name and text with ripgrep', async ($, on) => {
   const ui = await $.ui.mount(PANE('file-explorer', 120))
   await ui.press({ key: 'tab:search' })
 
+  // The controls before the field stay put as results come and go, so the
+  // focus does not slide off the field mid-typing.
+  const before = async () =>
+    (await ui.findAll({ type: 'Button' })).map(one => one.key).slice(0, (await ui.findAll({ type: 'Button' })).findIndex(one => one.key === 'search:text') + 1)
+  await ui.input({ key: 'search-input', text: 'zzzz', kind: 'change' })
+  const withNone = await before()
+  await ui.input({ key: 'search-input', text: 'm', kind: 'change' })
+  expect(await before()).toEqual(withNone)
+  expect(withNone).toContain('list:up')
+
   // Name search filters as you type, best match first.
   await ui.input({ key: 'search-input', text: 'mt', kind: 'change' })
   const found = (await ui.findAll({ type: 'Button' })).filter(one => one.key?.startsWith('found:'))
