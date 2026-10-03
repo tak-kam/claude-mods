@@ -9,6 +9,8 @@ import type {
   ExplorerPreview,
   ExplorerView,
 } from '../types'
+import { iconFor, iconWidth } from './icons'
+import type { IconStyle } from './icons'
 
 const EXPLORER = 'file-explorer'
 const PREVIEW = 'file-preview'
@@ -41,7 +43,7 @@ const listOffset = atom({ plugin: 'file-explorer', key: 'listOffset' } as const,
 const previewOffset = atom({ plugin: 'file-explorer', key: 'previewOffset' } as const, 0)
 
 // What the explorer was last drawn as, so presses know where a file shows.
-const layout = { isSplit: false, sidebarColumns: 0, listRows: 20, previewRows: 20 }
+const layout = { isSplit: false, sidebarColumns: 0, listRows: 20, previewRows: 20, icons: 'emoji' as IconStyle }
 
 // VS Code's decoration colours, by the letter drawn at the row's end.
 const BADGE_COLOR: Record<string, string> = {
@@ -544,7 +546,8 @@ async function drawSidebar(
     lines = list.map(change => {
       const where = parentOf(change.path)
       const mark = edited.has(change.path) ? '✎' : ''
-      const room = width - 4 - mark.length
+      const icon = iconFor(baseName(change.path), false, false, layout.icons)
+      const room = width - 4 - mark.length - iconWidth(icon, layout.icons)
       const label = fit(baseName(change.path), room)
       const rest = room - label.length - 1
       return {
@@ -552,6 +555,7 @@ async function drawSidebar(
         node: (
           <Box key={`line:${change.path}`} flexDirection="row">
             <Text color="blue">{change.path === chosen ? '▌' : ' '}</Text>
+            {icon.glyph !== '' && <Text color={icon.color}>{icon.glyph}</Text>}
             <Button
               key={`change:${change.path}`}
               label={label}
@@ -580,17 +584,26 @@ async function drawSidebar(
       const badge = letter === undefined ? '' : entry.isDir ? '●' : letter
       const mark = edited.has(rel) ? '✎' : ''
       const indent = '  '.repeat(depth)
-      // Folders: a blue chevron and a trailing slash; files: a dim dot.
-      const icon = entry.isDir ? (open.has(rel) ? '▾ ' : '▸ ') : '· '
+      // Folders: a blue chevron, their icon and a trailing slash; files: their icon.
+      const isOpen = open.has(rel)
+      const chevron = entry.isDir ? (isOpen ? '▾ ' : '▸ ') : layout.icons === 'ascii' ? '' : '  '
+      const icon = iconFor(entry.name, entry.isDir, isOpen, layout.icons)
       const name = entry.isDir ? `${entry.name}/` : entry.name
-      const room = width - 1 - indent.length - icon.length - badge.length - mark.length - 2
+      const used = indent.length + chevron.length + iconWidth(icon, layout.icons) + badge.length + mark.length
+      const room = width - 3 - used
       return {
         key: rel,
         node: (
           <Box key={`line:${rel}`} flexDirection="row">
             <Text color="blue">{rel === chosen ? '▌' : ' '}</Text>
             <Text dimColor>{indent}</Text>
-            {entry.isDir ? <Text color="blue" bold>{icon}</Text> : <Text dimColor>{icon}</Text>}
+            {chevron !== '' && (entry.isDir ? <Text color="blue" bold>{chevron}</Text> : <Text>{chevron}</Text>)}
+            {icon.glyph !== '' &&
+              (icon.color === undefined ? (
+                <Text dimColor={layout.icons === 'ascii' ? true : undefined}>{icon.glyph}</Text>
+              ) : (
+                <Text color={icon.color}>{icon.glyph}</Text>
+              ))}
             <Button
               key={`row:${rel}`}
               label={fit(name, room)}
@@ -751,7 +764,10 @@ async function drawPreview(
   return (
     <Box flexDirection="column" flexGrow={1}>
       <Box flexDirection="row" justifyContent="space-between">
-        <Text bold>{fit(shown.path, width - 16)}</Text>
+        <Text bold>
+          {layout.icons === 'ascii' ? '' : iconFor(baseName(shown.path), false, false, layout.icons).glyph}
+          {fit(shown.path, width - 19)}
+        </Text>
         <Box flexDirection="row" gap={1}>
           {isOver && <Button key="up" label="▲" plain hotkey="k" onPress={() => scroll(-Math.max(1, Math.floor(room / 2)))} />}
           {isOver && <Button key="down" label="▼" plain hotkey="j" onPress={() => scroll(Math.max(1, Math.floor(room / 2)))} />}
@@ -788,7 +804,9 @@ async function drawPreview(
   )
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  const style = options.icons
+  layout.icons = style === 'nerd' || style === 'ascii' ? style : 'emoji'
   let pending: { cancel: () => void } | undefined
 
   on('session.start', async ($, e, next) => {

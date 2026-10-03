@@ -31,7 +31,8 @@ claude --plugin-dir ./file-explorer
 
 - `/files [files|changes|history]` opens the explorer; `/changes [ref | a..b | a...b]` opens the changes view
 - From 80 columns wide the pane splits: the tree on the left, the open file or diff on the right, each scrolled on its own (the wheel scrolls the column under the pointer). Narrower, the file opens in a pane of its own. `/files` asks the dock for 110 columns; drag it wider or narrower as you like.
-- Folders are drawn with a blue `▸`/`▾` and a trailing `/`, files with a dim `·`
+- Files and folders carry icons by name and extension (📁 📂 📘 📝 🐍 …); folders also get a blue `▸`/`▾` and a trailing `/`
+- Icon style is the `icons` option in `/config`: `emoji` (default, any terminal), `nerd` (needs a Nerd Font; coloured like VS Code), or `ascii`
 - Explorer: `f` Files, `c` Changes, `h` History
 - Preview: `o` / `d` file or diff, `j` / `k` scroll, `n` / `p` next or previous change, `q` quotes the mouse selection, `❝ quote` quotes a hunk, `@` inserts `@path`
 

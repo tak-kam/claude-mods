@@ -101,6 +101,8 @@ test('browses files and git changes with diffs', async ($, on) => {
   const ui = await $.ui.mount(PANE('file-explorer'))
   expect((await ui.find({ key: 'row:src' }))?.text).toBe('src/')
   expect(await ui.find({ type: 'Text', text: '▸ ' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '📁 ' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '📖 ' })).toBeDefined()
   expect((await ui.find({ key: 'tab:changes' }))?.text).toBe('Changes 2')
   await ui.press({ key: 'row:src' })
   expect(await ui.find({ key: 'row:src/main.ts' })).toBeDefined()
@@ -178,4 +180,20 @@ test('splits into a tree and a preview when wide', async ($, on) => {
 
   await ui.press({ key: 'down' })
   expect((await ui.find({ type: 'Code' }))?.props.startLine).toBeGreaterThan(1)
+})
+
+test('draws Nerd Font icons in colour when configured', { options: { icons: 'nerd' } }, async ($, on) => {
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('fs.list', async (_$, e) => ({
+    value: (TREE[e.path] ?? []).map(one => ({ ...one, mtimeMs: 0, isLink: false })),
+  }))
+  on('process.run', async (_$, e) => fakeGit(e.argv, []))
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE('file-explorer'))
+  await ui.press({ key: 'row:src' })
+  const ts = await ui.find({ type: 'Text', text: '\ue628 ' })
+  expect(ts?.props.color).toBe('blue')
 })
