@@ -30,7 +30,9 @@ claude --plugin-dir ./file-explorer
 ## file-explorer
 
 - `/files [files|changes|history]` opens the explorer; `/changes [ref | a..b | a...b]` opens the changes view
-- Explorer tabs: `f` Files, `c` Changes, `h` History
-- Preview: `f` / `d` file or diff, `n` / `p` next or previous change, `q` quotes the mouse selection, `❝ quote` quotes a hunk, `@` inserts `@path`
+- From 80 columns wide the pane splits: the tree on the left, the open file or diff on the right, each scrolled on its own (the wheel scrolls the column under the pointer). Narrower, the file opens in a pane of its own. `/files` asks the dock for 110 columns; drag it wider or narrower as you like.
+- Folders are drawn with a blue `▸`/`▾` and a trailing `/`, files with a dim `·`
+- Explorer: `f` Files, `c` Changes, `h` History
+- Preview: `o` / `d` file or diff, `j` / `k` scroll, `n` / `p` next or previous change, `q` quotes the mouse selection, `❝ quote` quotes a hunk, `@` inserts `@path`
 
-The pane docks beside the transcript in fullscreen mode at 144 columns or wider when opened at start; `/files` opens it at any width.
+Opened at start, the pane docks beside the transcript in fullscreen mode at 144 columns or wider; `/files` opens it at any width.
