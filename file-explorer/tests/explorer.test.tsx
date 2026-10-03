@@ -236,8 +236,11 @@ test('previews markdown rendered and follows its relative links', async ($, on) 
   const ui = await $.ui.mount(PANE('file-explorer', 120))
   await ui.press({ key: 'row:README.md' })
 
+  // The heading is a band of its own; the paragraph stays markdown.
+  const band = await ui.find({ type: 'Text', text: /^ App\s+$/ })
+  expect(band?.props.backgroundColor).toBe('cyan')
   const md = await ui.find({ type: 'Markdown' })
-  expect(md?.props.text).toBe(readme.replace(/\n$/, ''))
+  expect(md?.props.text).toBe('See [main](./src/main.ts) and [site](https://example.com).')
   expect(md?.props.pressableLinks).toEqual(['./src/main.ts'])
 
   await ui.press({ key: 'mode:file' })
@@ -246,7 +249,7 @@ test('previews markdown rendered and follows its relative links', async ($, on) 
   await ui.press({ key: 'mode:rendered' })
 
   // A relative link opens the file and unfolds the tree down to it.
-  await ui.press({ key: 'md', link: { href: './src/main.ts' } })
+  await ui.press({ key: 'md:1', link: { href: './src/main.ts' } })
   expect((await ui.find({ type: 'Code' }))?.props.path).toBe('src/main.ts')
   expect(await ui.find({ key: 'row:src/main.ts' })).toBeDefined()
 })
