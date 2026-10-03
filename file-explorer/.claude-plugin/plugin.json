@@ -5,5 +5,18 @@
   "types": "./types/index.d.ts",
   "author": {
     "name": "tak-kam"
+  },
+  "userConfig": {
+    "icons": {
+      "type": "string",
+      "title": "Icons",
+      "description": "File and folder icons: emoji (any terminal), nerd (needs a Nerd Font, coloured like VS Code) or ascii",
+      "default": "emoji",
+      "options": [
+        "emoji",
+        "nerd",
+        "ascii"
+      ]
+    }
   }
 }
