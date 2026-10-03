@@ -23,9 +23,12 @@ export type ExplorerCommit = {
   when: string
 }
 
+// `rendered` draws a markdown file as markdown.
+export type ExplorerMode = 'file' | 'diff' | 'rendered'
+
 export type ExplorerPreview = {
   path: string
-  mode: 'file' | 'diff'
+  mode: ExplorerMode
   text: string
   diff: string
   note: string
