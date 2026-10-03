@@ -734,9 +734,12 @@ async function drawSearchControls(
           key="search-input"
           placeholder={isText ? 'text in files (Enter)' : 'file name'}
           autoFocus
-          onInput={(value: string) =>
-            isText ? update($, search, now => ({ ...now, query: value })) : searchFiles($, value)
-          }
+          onInput={async (value: string) => {
+            if (isText) await update($, search, now => ({ ...now, query: value }))
+            else await searchFiles($, value)
+            // Keep typing in the field however much the results moved around it.
+            await $.ui.focus({ requestId: EXPLORER, key: 'search-input' }).catch(() => undefined)
+          }}
           onSubmit={async (value: string) => {
             if (isText) return searchText($, value)
             await searchFiles($, value)
@@ -978,10 +981,15 @@ async function drawSidebar(
             dimColor={current === 'search' ? undefined : true}
             onPress={() => update($, view, () => 'search' as const)} />
         </Box>
-        {isOver && (
+        {/* Always drawn in the split view, dim when the list fits: these sit
+            before the search field, and a control appearing or vanishing there
+            as results change moved the focus off the field mid-typing. */}
+        {rows !== undefined && (
           <Box flexDirection="row">
-            <Button key="list:up" label="▲" plain onPress={() => scroll(-Math.max(1, room - 2))} />
-            <Button key="list:down" label="▼" plain onPress={() => scroll(Math.max(1, room - 2))} />
+            <Button key="list:up" label="▲" plain dimColor={isOver ? undefined : true}
+              onPress={() => scroll(-Math.max(1, room - 2))} />
+            <Button key="list:down" label="▼" plain dimColor={isOver ? undefined : true}
+              onPress={() => scroll(Math.max(1, room - 2))} />
           </Box>
         )}
       </Box>
