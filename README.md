@@ -17,6 +17,17 @@ claude plugin install file-explorer@claude-mods
 
 Or inside a session: `/plugin marketplace add tak-kam/claude-mods`, then `/plugin install file-explorer@claude-mods`.
 
+To update to the latest version:
+
+```sh
+claude plugin marketplace update claude-mods
+claude plugin update file-explorer@claude-mods
+```
+
+Then restart Claude Code. Inside a session, `/plugin` → Marketplaces → `claude-mods` → Update does the same.
+
+Updates are picked up by the `version` in each mod's `.claude-plugin/plugin.json`: a change merged without a version bump is not offered as an update. Bump it with every change to a mod.
+
 To try a checkout without installing:
 
 ```sh
