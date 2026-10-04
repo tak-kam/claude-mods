@@ -504,3 +504,219 @@ test('keeps a hostile repository from reaching the terminal or git', async ($, o
   expect(await ui.find({ type: 'Code' })).toBeUndefined()
   toasts = []
 })
+
+test('shows renames, binaries and large files for what they are', async ($, on) => {
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('fs.list', async (_$, e) => ({
+    value: (e.path === ROOT
+      ? [
+          { name: 'big.log', kind: 'file' as const, size: 2 * 1024 * 1024 },
+          { name: 'logo.png', kind: 'file' as const, size: 300 },
+          { name: 'new.ts', kind: 'file' as const, size: 20 },
+        ]
+      : []
+    ).map(one => ({ ...one, mtimeMs: 0, isLink: false })),
+  }))
+  on('fs.stat', async (_$, e) => ({
+    value: { kind: 'file' as const, size: e.path.endsWith('big.log') ? 2 * 1024 * 1024 : 20, mtimeMs: 0, isLink: false, realPath: e.path },
+  }))
+  on('fs.read', async (_$, e) => ({ value: e.path.endsWith('.png') ? '\u0089PNG\u0000\u0000' : 'export {}\n' }))
+  on('process.run', async (_$, e) => {
+    const line = gitArgs(e.argv).join(' ')
+    if (line.startsWith('diff --relative --name-status')) return ok('R092\0old.ts\0new.ts\0M\0logo.png\0')
+    if (line.includes('-- old.ts new.ts')) return ok('diff --git a/old.ts b/new.ts\n@@ -1 +1 @@\n-export {}\n+export { a }\n')
+    if (line.includes('-- logo.png')) return ok('diff --git a/logo.png b/logo.png\nBinary files a/logo.png and b/logo.png differ\n')
+    return fakeGit(e.argv, [])
+  })
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+  on('ui.panes', async () => ({ value: [] }))
+
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE('file-explorer', 120))
+
+  await ui.press({ key: 'tab:changes' })
+  expect(await ui.find({ type: 'Text', text: ' R' })).toBeDefined()
+  await ui.press({ key: 'change:new.ts' })
+  expect(await ui.find({ type: 'Text', text: 'renamed from old.ts' })).toBeDefined()
+  expect(String((await ui.find({ type: 'Code' }))?.props.source)).toContain('+export { a }')
+
+  await ui.press({ key: 'change:logo.png' })
+  expect(await ui.find({ type: 'Text', text: 'binary file changed' })).toBeDefined()
+  await ui.press({ key: 'mode:file' })
+  expect(await ui.find({ type: 'Text', text: 'binary file' })).toBeDefined()
+  expect(await ui.find({ type: 'Code' })).toBeUndefined()
+
+  await ui.press({ key: 'tab:files' })
+  await ui.press({ key: 'row:big.log' })
+  expect(await ui.find({ type: 'Text', text: '2048 KiB: too large to preview' })).toBeDefined()
+})
+
+test('says so outside a git repository', async ($, on) => {
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('fs.stat', async (_$, e) => STAT(e.path))
+  on('fs.list', async () => ({ value: [{ name: 'notes.txt', kind: 'file' as const, size: 5, mtimeMs: 0, isLink: false }] }))
+  on('process.run', async () => ({
+    value: { exitCode: 128, stdout: '', stderr: 'fatal: not a git repository', isStdoutTruncated: false, isStderrTruncated: false },
+  }))
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE('file-explorer', 120))
+  expect(await ui.find({ key: 'row:notes.txt' })).toBeDefined()
+  expect((await ui.find({ key: 'tab:changes' }))?.text).toMatch(/ 0$/)
+  await ui.press({ key: 'tab:changes' })
+  expect(await ui.find({ type: 'Text', text: 'Not a git repository' })).toBeDefined()
+  await ui.press({ key: 'tab:history' })
+  expect(await ui.find({ type: 'Text', text: 'No commits.' })).toBeDefined()
+})
+
+test('draws on every surface, and searches only where one can type', async ($, on) => {
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('fs.stat', async (_$, e) => STAT(e.path))
+  on('fs.list', async (_$, e) => ({
+    value: (TREE[e.path] ?? []).map(one => ({ ...one, mtimeMs: 0, isLink: false })),
+  }))
+  on('fs.read', async () => ({ value: 'export {}\n' }))
+  on('process.run', async (_$, e) => fakeGit(e.argv, []))
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+  on('ui.panes', async () => ({ value: [] }))
+
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
+    for (const columns of [50, 120]) {
+      const ui = await $.ui.mount({ ...PANE('file-explorer', columns), surface })
+      expect(await ui.find({ key: 'row:src' })).toBeDefined()
+      await ui.press({ key: 'tab:search' })
+      const field = await ui.find({ key: 'search-input' })
+      if (surface === 'mobile') {
+        expect(field).toBeUndefined()
+        expect(await ui.find({ type: 'Text', text: 'Search needs a surface with text input.' })).toBeDefined()
+      } else {
+        expect(field).toBeDefined()
+      }
+      await ui.press({ key: 'tab:files' })
+      await ui.unmount()
+    }
+    const shown = await $.ui.mount({ ...PANE('file-preview', 60), surface })
+    expect(await shown.find({ type: 'Text' })).toBeDefined()
+    await shown.unmount()
+  }
+})
+
+test('opens the preview as its own pane when narrow', async ($, on) => {
+  const opened: string[] = []
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('fs.stat', async (_$, e) => STAT(e.path))
+  on('fs.list', async (_$, e) => ({
+    value: (TREE[e.path] ?? []).map(one => ({ ...one, mtimeMs: 0, isLink: false })),
+  }))
+  on('fs.read', async () => ({ value: 'export {}\n' }))
+  on('process.run', async (_$, e) => fakeGit(e.argv, []))
+  on('ui.open', async (_$, e) => {
+    opened.push(e.id)
+    return { value: { isPlaced: true as const } }
+  })
+  on('ui.panes', async () => ({ value: [] }))
+
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const narrow = await $.ui.mount(PANE('file-explorer', 60))
+  await narrow.press({ key: 'row:README.md' })
+  expect(opened).toContain('file-preview')
+  expect(await narrow.find({ type: 'Markdown' })).toBeUndefined()
+
+  opened.length = 0
+  await narrow.unmount()
+  const wide = await $.ui.mount(PANE('file-explorer', 120))
+  await wide.press({ key: 'row:README.md' })
+  expect(opened).not.toContain('file-preview')
+})
+
+test('marks what Claude edited, collapses, scrolls and draws ascii icons', { options: { icons: 'ascii' } }, async ($, on) => {
+  const dirs = Array.from({ length: 12 }, (_, i) => `d${String(i).padStart(2, '0')}`)
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('fs.stat', async (_$, e) => STAT(e.path))
+  on('fs.list', async (_$, e) => ({
+    value:
+      e.path === ROOT
+        ? dirs.map(name => ({ name, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false }))
+        : Array.from({ length: 5 }, (_, i) => ({ name: `f${i}.ts`, kind: 'file' as const, size: 9, mtimeMs: 0, isLink: false })),
+  }))
+  on('fs.read', async () => ({ value: 'x\n' }))
+  on('process.run', async (_$, e) => fakeGit(e.argv, []))
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+  on('ui.panes', async () => ({ value: [] }))
+  on('tool.call', async () => ({ result: {} as never }))
+  const clock = mock.clock(on)
+
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE('file-explorer', 120), props: { ...PANE('file-explorer', 120).props, scroll: { offset: 0, bodyRows: 12 } } })
+
+  // ascii: a chevron and no icon for folders, a dim dot for files.
+  expect(await ui.find({ type: 'Text', text: '▸ ' })).toBeDefined()
+  await ui.press({ key: 'row:d00' })
+  const dot = await ui.find({ type: 'Text', text: '· ' })
+  expect(dot?.props.dimColor).toBe(true)
+
+  // An edit by Claude marks the file.
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/d00/f1.ts`, old_string: 'x', new_string: 'y' } as never)
+  await clock.advance(500)
+  expect(await ui.find({ type: 'Text', text: '✎' })).toBeDefined()
+
+  // The list scrolls by its own buttons, and collapses whole.
+  expect(await ui.find({ key: 'row:d11' })).toBeUndefined()
+  await ui.press({ key: 'list:down' })
+  await ui.press({ key: 'list:down' })
+  expect(await ui.find({ key: 'row:d11' })).toBeDefined()
+  await ui.press({ key: 'collapse' })
+  await ui.press({ key: 'list:up' })
+  await ui.press({ key: 'list:up' })
+  expect(await ui.find({ key: 'row:d00/f1.ts' })).toBeUndefined()
+  expect(await ui.find({ key: 'row:d00' })).toBeDefined()
+})
+
+test('compares commit ranges and refuses unknown refs', async ($, on) => {
+  const toasts: string[] = []
+  const runs: string[] = []
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('fs.stat', async (_$, e) => STAT(e.path))
+  on('fs.list', async () => ({ value: [] }))
+  on('process.run', async (_$, e) => {
+    const line = gitArgs(e.argv).join(' ')
+    runs.push(line)
+    if (line === 'rev-parse --verify -q main^{commit}') return ok('m1\n')
+    if (line === 'rev-parse --verify -q topic^{commit}') return ok('t1\n')
+    if (line === 'merge-base m1 t1') return ok('b1\n')
+    if (line.startsWith('diff --relative --name-status')) return ok('M\0x.ts\0')
+    return fakeGit(e.argv, [])
+  })
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+  on('ui.panes', async () => ({ value: [] }))
+  on('ui.toast', async (_$, e) => {
+    toasts.push(String((e as { text?: unknown }).text ?? ''))
+    return { value: undefined }
+  })
+
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE('file-explorer', 120))
+  await ui.press({ key: 'tab:changes' })
+
+  await ui.input({ key: 'base-ref', text: 'main..topic' })
+  expect(runs).toContain('diff --relative --name-status -z -M m1 t1')
+  expect((await ui.find({ key: 'base' }))?.text).toBe('main..topic')
+
+  await ui.input({ key: 'base-ref', text: 'main...topic' })
+  expect(runs).toContain('diff --relative --name-status -z -M b1 t1')
+
+  await ui.input({ key: 'base-ref', text: 'nope' })
+  expect(toasts).toContain('Unknown ref: nope')
+  expect((await ui.find({ key: 'base' }))?.text).toBe('main...topic')
+
+  await ui.input({ key: 'base-ref', text: '' })
+  expect((await ui.find({ key: 'base' }))?.text).toBe('HEAD')
+})

@@ -14,7 +14,8 @@ import type {
 } from '../types'
 import { iconFor, iconWidth } from './icons'
 import { compileQuery, excerpt, fuzzyFilter, fuzzyIndex, matchSpan, parseGrep } from './search'
-import { cellWidth, fitCells, splitMarkdown } from './markdown'
+import { cellWidth, fitCells, localLinks, markdownWindow, resolveLink, splitMarkdown } from './markdown'
+import { clipDiff, hunkOffset, parseLog, parseNameStatus, sliceHunk, splitHunks } from './diff'
 import { cleanText, isPlainRelative, oneLine } from './safe'
 import type { IconStyle } from './icons'
 
@@ -157,28 +158,7 @@ async function toggleDir($: EngineInterface, rel: string) {
 
 // ---- git -----------------------------------------------------------------
 
-const letterOf = (status: string) => {
-  const head = status.charAt(0)
-  if (head === 'T') return 'M'
-  if (head === 'U') return '!'
-  return head === '' ? '?' : head
-}
 
-// `git diff --name-status -z`: a status, then one path, or two for R and C.
-function parseNameStatus(raw: string): ExplorerChange[] {
-  const parts = raw.split('\0').filter(part => part !== '')
-  const out: ExplorerChange[] = []
-  for (let i = 0; i < parts.length; ) {
-    const letter = letterOf(parts[i++] ?? '')
-    if (letter === 'R' || letter === 'C') {
-      const from = parts[i++] ?? ''
-      out.push({ path: parts[i++] ?? '', letter, from })
-    } else {
-      out.push({ path: parts[i++] ?? '', letter })
-    }
-  }
-  return out
-}
 
 // The working tree as a tree object, staged nothing: written through an
 // index of the explorer's own, so the person's index and stash are untouched.
@@ -254,40 +234,6 @@ async function loadChanges($: EngineInterface) {
   await update($, changes, () => found)
 }
 
-// Keeps whole hunks while they fit; a first hunk that alone is too long is
-// cut by lines and its header recounted, so it still parses as a diff.
-function clipDiff(diff: string, limit: number): { text: string; isCut: boolean } {
-  if (diff.length <= limit) return { text: diff, isCut: false }
-  const hunks = diff.split(/\n(?=@@ )/)
-  let text = ''
-  for (const hunk of hunks) {
-    const joined = text === '' ? hunk : `${text}\n${hunk}`
-    if (joined.length > limit - 1) break
-    text = joined
-  }
-  if (text !== '') return { text: `${text}\n`, isCut: true }
-
-  const lines = (hunks[0] ?? '').split('\n')
-  const header = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/.exec(lines[0] ?? '')
-  if (header === null) return { text: diff.slice(0, limit), isCut: true }
-  const kept: string[] = []
-  let size = (lines[0] ?? '').length + 1
-  let oldCount = 0
-  let newCount = 0
-  for (const line of lines.slice(1)) {
-    if (size + line.length + 1 > limit - 40) break
-    kept.push(line)
-    size += line.length + 1
-    if (line.startsWith('-')) oldCount++
-    else if (line.startsWith('+')) newCount++
-    else if (line.startsWith(' ')) {
-      oldCount++
-      newCount++
-    }
-  }
-  const head = `@@ -${header[1]},${oldCount} +${header[2]},${newCount} @@${header[3]}`
-  return { text: `${[head, ...kept].join('\n')}\n`, isCut: true }
-}
 
 async function diffOf($: EngineInterface, change: ExplorerChange): Promise<{ diff: string; note: string }> {
   const now = await read($, base)
@@ -389,20 +335,6 @@ async function chooseBase($: EngineInterface, typed: string) {
   else await setBase($, { ref: found.stdout.trim(), label: name })
 }
 
-// `git log` records, fields split by \x1f and records by \x1e.
-function parseLog(raw: string): ExplorerCommit[] {
-  return raw
-    .split('\x1e')
-    .map(record => record.replace(/^\n/, '').split('\x1f'))
-    .filter(fields => fields.length >= 5)
-    .map(([sha = '', short = '', subject = '', author = '', when = '']) => ({
-      sha,
-      short: oneLine(short),
-      subject: oneLine(subject),
-      author: oneLine(author),
-      when: oneLine(when),
-    }))
-}
 
 async function loadHistory($: EngineInterface) {
   const log = await git($, [
@@ -614,39 +546,7 @@ async function quoteSelection($: EngineInterface, path: string) {
   await quote($, picked.text, `\`${path}\` ${label === '' ? '(selected)' : label}`, '')
 }
 
-// One `@@` block per hunk, so each can be drawn and quoted on its own.
-function splitHunks(diff: string): { header: string; body: string; lines: string }[] {
-  return diff
-    .split(/\n(?=@@ )/)
-    .filter(hunk => hunk.startsWith('@@ '))
-    .map(hunk => {
-      const header = hunk.slice(0, hunk.indexOf('\n') < 0 ? hunk.length : hunk.indexOf('\n'))
-      const at = /\+(\d+)(?:,(\d+))?/.exec(header)
-      const start = Number(at?.[1] ?? 0)
-      const count = Number(at?.[2] ?? 1)
-      const lines = count <= 1 ? `line ${start}` : `lines ${start}-${start + count - 1}`
-      return { header, body: hunk.endsWith('\n') ? hunk : `${hunk}\n`, lines }
-    })
-}
 
-// Rows `skip` to `skip + take` of a hunk's body lines, its header recounted
-// so the slice still parses as a hunk.
-function sliceHunk(body: string, skip: number, take: number): string {
-  const lines = body.replace(/\n$/, '').split('\n')
-  const header = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/.exec(lines[0] ?? '')
-  const content = lines.slice(1)
-  if (header === null) return body
-  let oldStart = Number(header[1])
-  let newStart = Number(header[2])
-  for (const line of content.slice(0, skip)) {
-    if (!line.startsWith('+')) oldStart++
-    if (!line.startsWith('-')) newStart++
-  }
-  const kept = content.slice(skip, skip + take)
-  const oldCount = kept.filter(line => !line.startsWith('+')).length
-  const newCount = kept.filter(line => !line.startsWith('-')).length
-  return `${[`@@ -${oldStart},${oldCount} +${newStart},${newCount} @@${header[3]}`, ...kept].join('\n')}\n`
-}
 
 async function refreshAll($: EngineInterface) {
   const open = await read($, expanded)
@@ -703,35 +603,7 @@ function folderBadges(list: ExplorerChange[]): Record<string, string> {
   return out
 }
 
-// Relative links of a markdown text: what a press may open in the explorer.
-function localLinks(text: string): string[] {
-  const found = new Set<string>()
-  for (const match of text.matchAll(/\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)/g)) {
-    const href = match[1] ?? ''
-    if (href !== '' && !href.startsWith('#') && !/^[a-z][a-z0-9+.-]*:/i.test(href)) found.add(href)
-    if (found.size >= 256) break
-  }
-  return [...found]
-}
 
-// A link's target relative to the root: from the file's folder, or from the
-// root for one starting with `/`; `..` above the root is refused.
-function resolveLink(from: string, href: string): string | undefined {
-  let path = href.split('#')[0] ?? ''
-  try {
-    path = decodeURI(path)
-  } catch {}
-  if (path === '') return undefined
-  const parts = path.startsWith('/') ? [] : parentOf(from).split('/').filter(Boolean)
-  for (const part of path.split('/')) {
-    if (part === '' || part === '.') continue
-    if (part === '..') {
-      if (parts.length === 0) return undefined
-      parts.pop()
-    } else parts.push(part)
-  }
-  return parts.join('/')
-}
 
 // Opens every folder down to `dir`, so the tree shows where a file is.
 async function unfold($: EngineInterface, dir: string) {
@@ -764,63 +636,11 @@ async function openLink($: EngineInterface, from: string, href: string) {
   }
 }
 
-// Lines `from` onward of a markdown text, as many as fit `room` rows at
-// `width`. A window starting inside a fenced block reopens the fence with
-// its opening line, and one ending inside closes it, so code stays code.
-function markdownWindow(lines: string[], from: number, room: number, width: number): { text: string; start: number; end: number } {
-  const opener: (string | undefined)[] = []
-  let fence = ''
-  let fenceLine: string | undefined
-  for (const line of lines) {
-    opener.push(fenceLine)
-    const mark = /^\s*(`{3,}|~{3,})/.exec(line)?.[1]
-    if (mark === undefined) continue
-    if (fence === '') {
-      fence = mark
-      fenceLine = line
-    } else if (mark.charAt(0) === fence.charAt(0) && mark.length >= fence.length) {
-      fence = ''
-      fenceLine = undefined
-    }
-  }
-  const start = clamp(from, 0, Math.max(0, lines.length - 1))
-  const reopen = opener[start]
-  let used = reopen === undefined ? 0 : 1
-  let end = start
-  while (end < lines.length) {
-    const line = lines[end] ?? ''
-    const cost = Math.max(1, Math.ceil(line.length / Math.max(10, width))) + (/^#{1,6}\s/.test(line) ? 1 : 0)
-    if (used + cost > room - 1 && end > start) break
-    used += cost
-    end++
-  }
-  const close = opener[end] ?? undefined
-  const body = lines.slice(start, end)
-  const text = [
-    ...(reopen === undefined ? [] : [reopen]),
-    ...body,
-    ...(close === undefined || end >= lines.length ? [] : [(/^\s*(`{3,}|~{3,})/.exec(close)?.[1] ?? '```')]),
-  ].join('\n')
-  return { text, start, end }
-}
 
 // ---- following Claude ----------------------------------------------------
 
 const lineOf = (text: string, at: number) => (at < 0 ? 1 : text.slice(0, at).split('\n').length)
 
-// The rows before the hunk that holds new-side `line`, in drawPreview's
-// windowing (a hunk is its label row and its lines).
-function hunkOffset(diff: string, line: number): number {
-  let rows = 0
-  for (const hunk of splitHunks(diff)) {
-    const at = /\+(\d+)(?:,(\d+))?/.exec(hunk.header)
-    const start = Number(at?.[1] ?? 0)
-    const count = Number(at?.[2] ?? 1)
-    if (line < start + Math.max(1, count)) return rows
-    rows += hunk.body.replace(/\n$/, '').split('\n').length
-  }
-  return 0
-}
 
 // Shows in the preview what Claude just read or wrote: the file at the lines
 // it read, or the diff at the hunk it edited. Split view only, so it never
