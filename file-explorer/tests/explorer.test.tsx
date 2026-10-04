@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import { buttonCells } from '../hooks/wrap'
-import { HELP } from '../hooks/help'
+import { HELP, HELP_JA } from '../hooks/help'
 
 const ROOT = '/work/app'
 
@@ -918,7 +918,10 @@ test('shows the keys and commands as help, and every hotkey drawn is in it', asy
     .map(one => one.props.hotkey)
     .filter((key): key is string => typeof key === 'string')
   expect(hotkeys.length).toBeGreaterThan(10)
-  for (const key of new Set(hotkeys)) expect(HELP).toContain(`\`${key}\``)
+  for (const key of new Set(hotkeys)) {
+    expect(HELP).toContain(`\`${key}\``)
+    expect(HELP_JA).toContain(`\`${key}\``)
+  }
 
   // i shows the help in the preview; refresh leaves it; i again goes back.
   await ui.press({ key: 'help' })
@@ -933,4 +936,23 @@ test('shows the keys and commands as help, and every hotkey drawn is in it', asy
   // /files help opens it too.
   await $.command.run({ command: 'files', args: 'help' } as never)
   expect(await ui.find({ type: 'Text', text: /Keys and commands/ })).toBeDefined()
+})
+
+test('shows the help in Japanese when the language option says so', { options: { language: 'ja' } }, async ($, on) => {
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('fs.stat', async (_$, e) => STAT(e.path))
+  on('fs.list', async (_$, e) => ({
+    value: (TREE[e.path] ?? []).map(one => ({ ...one, mtimeMs: 0, isLink: false })),
+  }))
+  on('process.run', async (_$, e) => fakeGit(e.argv, []))
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+  on('ui.panes', async () => ({ value: [] }))
+
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE('file-explorer', 120))
+  await ui.press({ key: 'help' })
+  expect(await ui.find({ type: 'Text', text: /キーとコマンド/ })).toBeDefined()
+  const tables = (await ui.findAll({ type: 'Markdown' })).map(one => String(one.props.text))
+  expect(tables.some(text => text.includes('一覧のスクロール'))).toBe(true)
 })
