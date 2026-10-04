@@ -48,6 +48,7 @@ claude --plugin-dir ./file-explorer
 - `#` (`r`) in the preview inserts `@path (lines a-b)`: the lines you selected with the mouse, else the lines in view; `❝` quotes now name the lines too
 - Files and folders carry icons by name and extension (📁 📂 📘 📝 🐍 …); folders also get a blue `▸`/`▾` and a trailing `/`
 - The help's language is the `language` option in `/config`: `en` (default) or `ja`
+- Mermaid blocks in the markdown preview are drawn by your own [mermaid-cli](https://github.com/mermaid-js/mermaid-cli) (`mmdc`) when it is on your `PATH`: a picture in kitty/Ghostty, SVG in the desktop and VS Code apps. The explorer never installs it (`npm i -g @mermaid-js/mermaid-cli` does); without it the block stays code. Drawings are kept in `~/.cache/claude-file-explorer/mermaid`, and the `mermaid` option in `/config` set to `off` never runs `mmdc`
 - Icon style is the `icons` option in `/config`: `emoji` (default, any terminal), `nerd` (needs a Nerd Font; coloured like VS Code), or `ascii`
 - `i` (`?` in the sidebar) or `/files help` shows every key and command in the preview; `i` again goes back
 - Explorer: `f` Files, `c` Changes, `h` History, `s` Search
@@ -76,4 +77,5 @@ The explorer reads repositories you may not trust, so:
 - Every git call runs with `core.fsmonitor=false`, diffs with `--no-ext-diff --no-textconv`, and the prompt snapshot is skipped when the repository's own config defines a clean filter other than git-lfs, so a planted `.git/config` cannot make the explorer run a program
 - Commands run by argument vector, never through a shell; refs starting with `-` are refused
 - A symlink that leads out of the project is named, not read; tool paths with `..` are not followed
+- Mermaid blocks are only handed to an `mmdc` you installed yourself, on its standard input, under Mermaid's default `strict` security level (no scripts or click handlers in diagrams); its pictures go to your own cache folder, made private, never a shared temp directory. Set `mermaid` to `off` to never run it
 - File contents only reach Claude when you press `@`, `❝` or `#`

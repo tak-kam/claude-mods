@@ -54,6 +54,10 @@ CSV and TSV open as a table (\`◀\` \`▶\` scroll wide ones sideways); JSON an
 
 PNG files are drawn in the preview where the terminal can show pictures (kitty, Ghostty); elsewhere, and for JPEG, GIF and WebP, the preview names the format and size. SVG opens as its source, drawn above it in the desktop and VS Code apps.
 
+## Diagrams
+
+\`\`\`mermaid blocks in the markdown preview are drawn by your own mermaid-cli (\`mmdc\`) when it is installed (\`npm i -g @mermaid-js/mermaid-cli\`); the explorer never installs it. \`o\` shows the source; \`↻\` looks for a newly installed \`mmdc\` and retries failed diagrams. The \`mermaid\` option in \`/config\` turns it off.
+
 ## Commands
 
 | Command | Does |
@@ -120,6 +124,10 @@ CSV と TSV は表で開きます（幅が広いときは \`◀\` \`▶\` で横
 ## 画像
 
 PNG は画像を表示できるターミナル（kitty、Ghostty）ならプレビューに描画します。それ以外の環境や JPEG・GIF・WebP では、形式とサイズを表示します。SVG はソースで開き、デスクトップと VS Code ではその上に描画します。
+
+## 図（Mermaid）
+
+Markdown プレビューの \`\`\`mermaid ブロックは、mermaid-cli（\`mmdc\`）がインストールされていれば図として描きます（\`npm i -g @mermaid-js/mermaid-cli\`）。エクスプローラーが自動でインストールすることはありません。\`o\` でソース表示、\`↻\` で新しく入れた \`mmdc\` を探し直し、失敗した図を描き直します。\`/config\` の \`mermaid\` オプションでオフにできます。
 
 ## コマンド
 

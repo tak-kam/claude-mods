@@ -61,6 +61,15 @@ export type ExplorerPreview = {
   image?: { format: 'png' | 'jpeg' | 'gif' | 'webp'; width: number; height: number; file: string }
 }
 
+export type ExplorerDiagram = {
+  status: 'drawing' | 'ok' | 'error'
+  png?: string
+  width?: number
+  height?: number
+  svg?: string
+  error?: string
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'file-explorer': {
@@ -91,6 +100,10 @@ declare module 'claude-code' {
       symbol: { path: string; start: number; end: number } | null
       // The JSON tree of `path`: the containers folded or unfolded against
       // the default, and the node last picked (`a.b[3].c`), which `r` names.
+      // Mermaid blocks drawn by the person's mmdc, by diagramKey; whether
+      // mmdc answered at all.
+      diagrams: Record<string, ExplorerDiagram>
+      mermaidTool: 'unknown' | 'yes' | 'no'
       dataView: { path: string; toggled: string[]; pick: string }
       ignored: string[]
       hideIgnored: boolean
