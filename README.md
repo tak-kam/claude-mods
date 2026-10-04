@@ -57,6 +57,7 @@ claude --plugin-dir ./file-explorer
 - `y` copies the open file's path; `b` pins it to the top of the Files tab (pins are kept per project across sessions)
 - **Outline** (`t`) lists the open file's functions, classes and types (TypeScript, JavaScript, Python, Go, Rust) or its markdown headings; press one to scroll the preview there, and `r` then inserts `@file (lines a-b)` for that symbol
 - CSV/TSV open as an aligned table and JSON / JSON Lines as a foldable tree (`m`; `o` for the source). Pick a JSON node to see its path (`a.b[3].c`), which `r` inserts; invalid JSON says where it breaks
+- `l` lists the open file's own history in the History tab (renames followed; a commit opens its diff of the file), and `a` shows blame beside the source: who last changed each run of lines and when, the commit id a press away. Blame runs only when asked
 - A wide tree shows each file's size and age; files git ignores are drawn dim, and `g` (`⊘`) hides or shows them. The preview's status line names the open file's size and age too
 - Preview: `o` / `d` file or diff, `j` / `k` scroll, `n` / `p` next or previous change, `q` quotes the mouse selection, `❝ quote` quotes a hunk, `@` inserts `@path`
 

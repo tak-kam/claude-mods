@@ -15,7 +15,7 @@ import type {
 import { iconFor, iconWidth } from './icons'
 import { compileQuery, excerpt, fuzzyFilter, fuzzyIndex, matchSpan, parseGrep } from './search'
 import { cellWidth, fitCells, localLinks, markdownWindow, resolveLink, splitMarkdown } from './markdown'
-import { clipDiff, hunkOffset, parseLog, parseNameStatus, sliceHunk, splitHunks } from './diff'
+import { clipDiff, hunkOffset, parseBlame, parseFileLog, parseLog, parseNameStatus, sliceHunk, splitHunks, UNCOMMITTED } from './diff'
 import { cleanText, isPlainRelative, oneLine } from './safe'
 import { helpText } from './help'
 import { formatAge, formatSize, isIgnored, parseIgnored } from './details'
@@ -70,6 +70,9 @@ const search = atom({ plugin: 'file-explorer', key: 'search' } as const, NO_SEAR
 const ignored = atom({ plugin: 'file-explorer', key: 'ignored' } as const, [])
 const hideIgnored = atom({ plugin: 'file-explorer', key: 'hideIgnored' } as const, false)
 const pins = atom({ plugin: 'file-explorer', key: 'pins' } as const, [])
+const historyOf = atom({ plugin: 'file-explorer', key: 'historyOf' } as const, '')
+const fileHistory = atom({ plugin: 'file-explorer', key: 'fileHistory' } as const, [])
+const blame = atom({ plugin: 'file-explorer', key: 'blame' } as const, null)
 const symbol = atom({ plugin: 'file-explorer', key: 'symbol' } as const, null)
 const dataView = atom({ plugin: 'file-explorer', key: 'dataView' } as const, { path: '', toggled: [], pick: '' })
 const listOffset = atom({ plugin: 'file-explorer', key: 'listOffset' } as const, 0)
@@ -89,6 +92,8 @@ const cache: {
   outline?: { path: string; text: string; entries: OutlineEntry[] }
   // The data file last parsed, kept while that text is shown.
   data?: { path: string; text: string; parsed: ParsedData }
+  // The last blame run, by path, HEAD and the text it was run on.
+  blame?: { key: string; value: { path: string; shas: string[]; commits: Record<string, { short: string; author: string; time: number; summary: string }> } }
 } = {}
 
 // What the explorer was last drawn as, so presses know where a file shows.
@@ -376,6 +381,74 @@ async function openCommit($: EngineInterface, commit: ExplorerCommit) {
   await update($, view, () => 'changes' as const)
 }
 
+const LOG_FORMAT = '--format=%x1e%H%x1f%h%x1f%s%x1f%an%x1f%ar%x1f'
+const MAX_BLAME_LINES = 20000
+
+// The History tab narrowed to one file, renames followed.
+async function loadFileLog($: EngineInterface, rel: string) {
+  const log = await git($, ['log', '--follow', `-n${MAX_COMMITS}`, '--no-color', '--name-only', LOG_FORMAT, '--', rel])
+  await update($, fileHistory, () => (log.exitCode === 0 ? parseFileLog(log.stdout) : []))
+}
+
+async function showFileLog($: EngineInterface, rel: string) {
+  await update($, historyOf, () => rel)
+  await loadFileLog($, rel)
+  await update($, view, () => 'history' as const)
+  await update($, listOffset, () => 0)
+}
+
+// A commit from a file's history: the commit's changes, that file's diff shown.
+async function openFileCommit($: EngineInterface, commit: ExplorerCommit & { path: string }) {
+  await openCommit($, commit)
+  const rel = commit.path !== '' && isPlainRelative(commit.path) ? commit.path : await read($, historyOf)
+  await showPath($, rel, { mode: 'diff' })
+}
+
+// Blame of the shown file, run only when asked and kept while the file and
+// HEAD stay the same.
+async function loadBlame($: EngineInterface, shown: ExplorerPreview): Promise<boolean> {
+  const head = await git($, ['rev-parse', '--verify', '-q', 'HEAD'])
+  const key = `${shown.path}\0${head.stdout.trim()}\0${shown.text}`
+  if (cache.blame?.key === key) {
+    const kept = cache.blame.value
+    await update($, blame, () => kept)
+    return true
+  }
+  const blamed = await git($, ['blame', '--porcelain', '--no-textconv', '--', shown.path])
+  if (blamed.exitCode !== 0) {
+    $.ui.toast(`No blame: ${oneLine(blamed.stderr.trim().split('\n')[0] ?? 'git blame failed')}`)
+    return false
+  }
+  const value = { path: shown.path, ...parseBlame(blamed.stdout, MAX_BLAME_LINES) }
+  cache.blame = { key, value }
+  await update($, blame, () => value)
+  return true
+}
+
+async function toggleBlame($: EngineInterface, rel: string) {
+  const now = await read($, blame)
+  if (now !== null && now.path === rel) {
+    await update($, blame, () => null)
+    return
+  }
+  let shown = await read($, preview)
+  if (shown === null || shown.path !== rel) return
+  if (shown.mode !== 'file') {
+    await showPath($, rel, { mode: 'file' })
+    shown = await read($, preview)
+  }
+  if (shown !== null) await loadBlame($, shown)
+}
+
+// The commit a blame line points at, opened as a history entry would be.
+async function openBlamed($: EngineInterface, rel: string, sha: string, details: { short: string; author: string; summary: string }) {
+  if (sha === UNCOMMITTED) {
+    await showPath($, rel, { mode: 'diff' })
+    return
+  }
+  await openFileCommit($, { sha, short: details.short, subject: details.summary, author: details.author, when: '', path: rel })
+}
+
 // ---- search --------------------------------------------------------------
 
 async function run($: EngineInterface, argv: string[]) {
@@ -637,6 +710,9 @@ async function reloadPreview($: EngineInterface) {
     const offset = await read($, previewOffset)
     await showPath($, shown.path, { mode: shown.mode })
     await update($, previewOffset, () => offset)
+    const blamed = await read($, blame)
+    const now = await read($, preview)
+    if (blamed !== null && now !== null && blamed.path === now.path && now.mode === 'file') await loadBlame($, now)
   }
 }
 
@@ -760,6 +836,8 @@ async function refreshAll($: EngineInterface) {
   await loadChanges($)
   await loadIgnored($)
   await loadHistory($)
+  const narrowed = await read($, historyOf)
+  if (narrowed !== '') await loadFileLog($, narrowed)
   await reloadPreview($)
 }
 
@@ -1144,7 +1222,18 @@ async function drawSidebar(
       }
     }
   } else if (current === 'history') {
-    const commits = await read($, history)
+    const narrowed = await read($, historyOf)
+    const ofFile = narrowed === '' ? [] : await read($, fileHistory)
+    const commits: (ExplorerCommit & { path?: string })[] = narrowed === '' ? await read($, history) : ofFile
+    if (narrowed !== '') {
+      extra.push(
+        <Box key="history:of" flexDirection="row">
+          <Text color="blue">{fit(`⌚ ${narrowed}`, Math.max(4, width - 6))}</Text>
+          <Box flexGrow={1} />
+          <Button key="history:all" label="✕" plain onPress={() => update($, historyOf, () => '')} />
+        </Box>,
+      )
+    }
     if (commits.length === 0) extra.push(<Text dimColor>No commits.</Text>)
     lines = commits.map(commit => {
       const room = width - commit.short.length - 2
@@ -1156,7 +1245,8 @@ async function drawSidebar(
           <Box key={`line:${commit.sha}`} flexDirection="row">
             <Text color="blue">{against.head === commit.sha ? '▌' : ' '}</Text>
             <Text color="yellow">{fit(commit.short, 12)} </Text>
-            <Button key={`commit:${commit.sha}`} label={subject} plain onPress={() => openCommit($, commit)} />
+            <Button key={`commit:${commit.sha}`} label={subject} plain
+              onPress={() => (commit.path === undefined ? openCommit($, commit) : openFileCommit($, { ...commit, path: commit.path }))} />
             {rest > 6 && <Text dimColor> {fit(`${commit.when}, ${commit.author}`, rest)}</Text>}
           </Box>
         ),
@@ -1407,7 +1497,11 @@ async function drawPreview(
   const pick = tree !== undefined && tree.path === shown.path ? tree.pick : ''
   const dataTotal = parsed === undefined ? 0 : parsed.kind === 'table' ? parsed.lines.length : parsed.kind === 'tree' ? nodes.length : 1
   const total = shown.mode === 'data' ? dataTotal : isSource ? fileLines.length : hunkRows.reduce((sum, n) => sum + n, 0)
-  const isWrapped = await read($, wrapLines)
+  const blamed = await read($, blame)
+  const blameOf = blamed !== null && blamed.path === shown.path && shown.mode === 'file' ? blamed : undefined
+  // Blame lines up beside the source one row a line: no wrapping under it.
+  const isWrapped = (await read($, wrapLines)) && blameOf === undefined
+  const blameCells = blameOf === undefined ? 0 : width >= 70 ? 24 : 8
   const isTable = parsed?.kind === 'table'
   const shift = isWrapped && !isTable ? 0 : await read($, sideways)
   const isMd = isMarkdown(shown.path)
@@ -1497,6 +1591,16 @@ async function drawPreview(
     tools.push(tool('pin', '★', 'b', () => (
       <Button key="pin" label={isPinned ? '★' : '☆'} plain hotkey="b" onPress={() => togglePin($, shown.path)} />
     )))
+    const isRepo = (await read($, gitError)) !== 'Not a git repository'
+    if (isRepo) {
+      tools.push(tool('log', 'Log', 'l', () => <Button key="log" label="Log" plain hotkey="l" onPress={() => showFileLog($, shown.path)} />))
+    }
+    if (isRepo && shown.isOnDisk) {
+      tools.push(tool('blame', 'Blame', 'a', () => (
+        <Button key="blame" label="Blame" plain hotkey="a" dimColor={blameOf === undefined ? true : undefined}
+          onPress={() => toggleBlame($, shown.path)} />
+      )))
+    }
   }
   if (isOwnPane) {
     tools.push(tool('mention', '@', undefined, () => <Button key="mention" label="@" plain onPress={() => mention($, shown.path)} />))
@@ -1514,7 +1618,7 @@ async function drawPreview(
   // (line numbers; a diff's two plus its marker), a hunk label one.
   const digits = String(Math.max(total, 1)).length
   const gutter = shown.mode === 'diff' ? digits * 2 + 5 : digits + 3
-  const lineRoom = Math.max(10, width - gutter - 1)
+  const lineRoom = Math.max(10, width - gutter - 1 - blameCells)
   const costs: number[] = []
   if (shown.mode === 'file') for (const line of fileLines) costs.push(isWrapped ? rowsOf(line, lineRoom) : 1)
   if (shown.mode === 'diff') {
@@ -1667,7 +1771,42 @@ async function drawPreview(
     }
     if (nodes.length >= MAX_DATA_ROWS && offset + count >= total) body.push(<Text dimColor>(first {MAX_DATA_ROWS} rows; fold some to see more)</Text>)
   }
-  if (shown.mode === 'file' && fileLines.length > 0) {
+  if (shown.mode === 'file' && fileLines.length > 0 && blameOf !== undefined) {
+    // A run of lines from one commit is labelled once, at its top.
+    const nowMs = await clockNow($)
+    const marks: RenderElement[] = []
+    for (let i = offset; i < offset + count; i++) {
+      const sha = blameOf.shas[i] ?? ''
+      const details = blameOf.commits[sha]
+      if (details === undefined || (i > offset && blameOf.shas[i - 1] === sha)) {
+        marks.push(<Text key={`blame:${i + 1}`}>{' '}</Text>)
+        continue
+      }
+      const isMine = sha === UNCOMMITTED
+      const rest = blameCells - 8
+      const who = isMine ? 'uncommitted' : details.author
+      const age = isMine ? '' : formatAge(details.time * 1000, nowMs)
+      marks.push(
+        <Box key={`blame:${i + 1}`} flexDirection="row">
+          <Button key={`blamed:${i + 1}`} label={isMine ? '·······' : details.short} plain dimColor
+            onPress={() => openBlamed($, shown.path, sha, details)} />
+          {rest > 4 && <Text dimColor> {fitCells(who, rest - 5)} {fitCells(age, 3)}</Text>}
+        </Box>,
+      )
+    }
+    body.push(
+      <Box key="blamed" flexDirection="row">
+        <Box flexDirection="column" width={blameCells} flexShrink={0}>{marks}</Box>
+        <Code
+          source={`${fileLines.slice(offset, offset + count).map(line => shiftCells(line, shift)).join('\n')}\n`}
+          path={shown.path}
+          startLine={offset + 1}
+          wrap="truncate-end"
+        />
+      </Box>,
+    )
+  }
+  if (shown.mode === 'file' && fileLines.length > 0 && blameOf === undefined) {
     body.push(
       <Code
         source={`${fileLines.slice(offset, offset + count).map(line => shiftCells(line, shift)).join('\n')}\n`}

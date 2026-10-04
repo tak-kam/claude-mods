@@ -68,6 +68,13 @@ declare module 'claude-code' {
       listings: Record<string, ExplorerEntry[]>
       changes: ExplorerChange[]
       history: ExplorerCommit[]
+      // The History tab narrowed to one file ('' for every commit), and
+      // that file's commits with the path it had in each.
+      historyOf: string
+      fileHistory: (ExplorerCommit & { path: string })[]
+      // `git blame` of the shown file, asked for by the toolbar: a sha per
+      // line, and each commit's details once.
+      blame: { path: string; shas: string[]; commits: Record<string, { short: string; author: string; time: number; summary: string }> } | null
       gitError: string
       touched: string[]
       selected: string

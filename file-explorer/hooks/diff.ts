@@ -124,3 +124,57 @@ export function hunkOffset(diff: string, line: number): number {
   }
   return 0
 }
+
+// `git log --follow --name-only` with the log format above and a trailing
+// separator: each commit with the path the file had in it.
+export function parseFileLog(raw: string): (ExplorerCommit & { path: string })[] {
+  return raw
+    .split('\x1e')
+    .map(record => record.replace(/^\n+/, '').split('\x1f'))
+    .filter(fields => fields.length >= 6)
+    .map(([sha = '', short = '', subject = '', author = '', when = '', names = '']) => {
+      const path = names.split('\n').map(line => line.trim()).filter(Boolean).pop() ?? ''
+      return {
+        sha,
+        short: oneLine(short),
+        subject: oneLine(subject),
+        author: oneLine(author),
+        when: oneLine(when),
+        // A quoted name (git's way with odd bytes) is not a usable path.
+        path: path.startsWith('"') ? '' : path,
+      }
+    })
+}
+
+export type BlameCommit = { short: string; author: string; time: number; summary: string }
+
+// `git blame --porcelain`: each line's commit, by final line number; a
+// commit's details are printed only the first time it appears.
+export function parseBlame(raw: string, limit: number): { commits: Record<string, BlameCommit>; shas: string[] } {
+  const commits: Record<string, BlameCommit> = {}
+  const shas: string[] = []
+  let current = ''
+  for (const line of raw.split('\n')) {
+    if (line.startsWith('\t')) continue
+    const header = /^([0-9a-f]{40}) \d+ (\d+)(?: \d+)?$/.exec(line)
+    if (header !== null) {
+      current = header[1] ?? ''
+      const final = Number(header[2])
+      if (final >= 1 && final <= limit) shas[final - 1] = current
+      commits[current] ??= { short: current.slice(0, 7), author: '', time: 0, summary: '' }
+      continue
+    }
+    const commit = commits[current]
+    if (commit === undefined) continue
+    const space = line.indexOf(' ')
+    const key = space < 0 ? line : line.slice(0, space)
+    const value = space < 0 ? '' : line.slice(space + 1)
+    if (key === 'author') commit.author = oneLine(value)
+    else if (key === 'author-time') commit.time = Number(value) || 0
+    else if (key === 'summary') commit.summary = oneLine(value)
+  }
+  for (let i = 0; i < shas.length; i++) shas[i] ??= ''
+  return { commits, shas }
+}
+
+export const UNCOMMITTED = '0'.repeat(40)
