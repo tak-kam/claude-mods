@@ -49,6 +49,28 @@ export function splitMarkdown(markdown: string): MarkdownPart[] {
   return parts
 }
 
+// The ATX headings outside fences, with their 1-based lines: the same
+// reading as splitMarkdown, for an outline.
+export function markdownHeadings(markdown: string): { line: number; level: number; text: string }[] {
+  const found: { line: number; level: number; text: string }[] = []
+  let fence = ''
+  markdown.split('\n').forEach((line, i) => {
+    if (fence === '') {
+      const open = /^\s*(`{3,}|~{3,})/.exec(line)?.[1]
+      if (open !== undefined) {
+        fence = open
+        return
+      }
+      const heading = /^ {0,3}(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/.exec(line)
+      if (heading !== null) found.push({ line: i + 1, level: (heading[1] ?? '#').length, text: plainInline(heading[2] ?? '') })
+      return
+    }
+    const close = /^\s*(`{3,}|~{3,})\s*$/.exec(line)?.[1]
+    if (close !== undefined && close.charAt(0) === fence.charAt(0) && close.length >= fence.length) fence = ''
+  })
+  return found
+}
+
 // A heading's inline markdown reduced to its text: links to their label,
 // emphasis and code marks dropped.
 export function plainInline(text: string): string {
