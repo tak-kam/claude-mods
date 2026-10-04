@@ -65,6 +65,7 @@ function fakeGit(argv: readonly string[], log: string[]) {
   if (line.startsWith('diff --relative --name-status')) {
     return ok(args.includes('def') ? 'M\0src/main.ts\0D\0old.txt\0' : 'M\0src/main.ts\0')
   }
+  if (line.startsWith('ls-files --others --ignored')) return ok('build/\0')
   if (line.startsWith('ls-files --others')) return ok('src/util.ts\0')
   if (line.startsWith('diff --relative --no-color')) return ok(MAIN_DIFF, 0)
   if (line.startsWith('diff --no-index')) return ok('@@ -0,0 +1 @@\n+export {}\n', 1)
@@ -1013,4 +1014,52 @@ test('copies the path and pins files, the pins kept per project', async ($, on) 
   await ui.press({ key: 'pin' })
   expect(store.get(`pins:${ROOT}`)).toEqual(['README.md'])
   expect(await ui.find({ key: 'pinned:src/main.ts' })).toBeUndefined()
+})
+
+test('shows sizes and ages, and dims or hides what git ignores', async ($, on) => {
+  const DAY = 86_400_000
+  const now = 400 * DAY
+  const tree: Record<string, { name: string; kind: 'file' | 'dir'; size: number; mtimeMs: number }[]> = {
+    [ROOT]: [
+      { name: 'build', kind: 'dir', size: 0, mtimeMs: 0 },
+      { name: 'big.bin', kind: 'file', size: 4300, mtimeMs: now - 3 * DAY },
+      { name: 'README.md', kind: 'file', size: 812, mtimeMs: now - 5 * 60_000 },
+    ],
+  }
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('clock.now', async () => ({ value: now }))
+  on('fs.stat', async (_$, e) => ({
+    value: { kind: 'file' as const, size: 812, mtimeMs: now - 5 * 60_000, isLink: false, realPath: e.path },
+  }))
+  on('fs.list', async (_$, e) => ({ value: (tree[e.path] ?? []).map(one => ({ ...one, isLink: false })) }))
+  on('fs.read', async () => ({ value: '# Hi\n' }))
+  on('process.run', async (_$, e) => fakeGit(e.argv, []))
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+  on('ui.panes', async () => ({ value: [] }))
+
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE('file-explorer', 120))
+
+  // Ignored entries are drawn dim; files carry their size and age.
+  expect((await ui.find({ key: 'row:build' }))?.props.dimColor).toBe(true)
+  expect((await ui.find({ key: 'row:README.md' }))?.props.dimColor).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: ' 4.2K 3d' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: ' 812 5m' })).toBeDefined()
+
+  // g hides them, and again shows them.
+  await ui.press({ key: 'ignored' })
+  expect(await ui.find({ key: 'row:build' })).toBeUndefined()
+  expect(await ui.find({ key: 'row:README.md' })).toBeDefined()
+  await ui.press({ key: 'ignored' })
+  expect(await ui.find({ key: 'row:build' })).toBeDefined()
+
+  // The preview's status line names the size and age too.
+  await ui.press({ key: 'row:README.md' })
+  expect(await ui.find({ text: /812 · 5m ago/ })).toBeDefined()
+
+  // A narrow tree leaves the details out.
+  await ui.unmount()
+  const narrow = await $.ui.mount(PANE('file-explorer', 30))
+  expect(await narrow.find({ type: 'Text', text: ' 812 5m' })).toBeUndefined()
 })
