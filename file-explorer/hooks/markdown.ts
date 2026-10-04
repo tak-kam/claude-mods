@@ -98,3 +98,76 @@ export function fitCells(text: string, cells: number): string {
   }
   return out + ' '.repeat(Math.max(0, cells - cellWidth(out)))
 }
+
+const clamp = (value: number, low: number, high: number) => Math.max(low, Math.min(high, value))
+const parentOf = (rel: string) => (rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '')
+
+// Relative links of a markdown text: what a press may open in the explorer.
+export function localLinks(text: string): string[] {
+  const found = new Set<string>()
+  for (const match of text.matchAll(/\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)/g)) {
+    const href = match[1] ?? ''
+    if (href !== '' && !href.startsWith('#') && !/^[a-z][a-z0-9+.-]*:/i.test(href)) found.add(href)
+    if (found.size >= 256) break
+  }
+  return [...found]
+}
+
+// A link's target relative to the root: from the file's folder, or from the
+// root for one starting with `/`; `..` above the root is refused.
+export function resolveLink(from: string, href: string): string | undefined {
+  let path = href.split('#')[0] ?? ''
+  try {
+    path = decodeURI(path)
+  } catch {}
+  if (path === '') return undefined
+  const parts = path.startsWith('/') ? [] : parentOf(from).split('/').filter(Boolean)
+  for (const part of path.split('/')) {
+    if (part === '' || part === '.') continue
+    if (part === '..') {
+      if (parts.length === 0) return undefined
+      parts.pop()
+    } else parts.push(part)
+  }
+  return parts.join('/')
+}
+
+// Lines `from` onward of a markdown text, as many as fit `room` rows at
+// `width`. A window starting inside a fenced block reopens the fence with
+// its opening line, and one ending inside closes it, so code stays code.
+export function markdownWindow(lines: string[], from: number, room: number, width: number): { text: string; start: number; end: number } {
+  const opener: (string | undefined)[] = []
+  let fence = ''
+  let fenceLine: string | undefined
+  for (const line of lines) {
+    opener.push(fenceLine)
+    const mark = /^\s*(`{3,}|~{3,})/.exec(line)?.[1]
+    if (mark === undefined) continue
+    if (fence === '') {
+      fence = mark
+      fenceLine = line
+    } else if (mark.charAt(0) === fence.charAt(0) && mark.length >= fence.length) {
+      fence = ''
+      fenceLine = undefined
+    }
+  }
+  const start = clamp(from, 0, Math.max(0, lines.length - 1))
+  const reopen = opener[start]
+  let used = reopen === undefined ? 0 : 1
+  let end = start
+  while (end < lines.length) {
+    const line = lines[end] ?? ''
+    const cost = Math.max(1, Math.ceil(line.length / Math.max(10, width))) + (/^#{1,6}\s/.test(line) ? 1 : 0)
+    if (used + cost > room - 1 && end > start) break
+    used += cost
+    end++
+  }
+  const close = opener[end] ?? undefined
+  const body = lines.slice(start, end)
+  const text = [
+    ...(reopen === undefined ? [] : [reopen]),
+    ...body,
+    ...(close === undefined || end >= lines.length ? [] : [(/^\s*(`{3,}|~{3,})/.exec(close)?.[1] ?? '```')]),
+  ].join('\n')
+  return { text, start, end }
+}
