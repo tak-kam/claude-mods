@@ -847,3 +847,49 @@ test('never lets the search field grab the focus by itself', async ($, on) => {
   await ui.press({ key: 'hit:src/main.ts:1:14' })
   expect((await ui.find({ type: 'Code' }))?.props.path).toBe('src/main.ts')
 })
+
+test('quotes and references the selection from the prompt with /quote and /ref', async ($, on) => {
+  const text = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`).join('\n') + '\n'
+  let selection: { text: string; requestId?: string } | undefined = { text: 'line 12\nline 13\nline 14' }
+  let filled = ''
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('fs.stat', async (_$, e) => STAT(e.path))
+  on('fs.list', async (_$, e) => ({
+    value: (TREE[e.path] ?? []).map(one => ({ ...one, mtimeMs: 0, isLink: false })),
+  }))
+  on('fs.read', async () => ({ value: text }))
+  on('process.run', async (_$, e) => fakeGit(e.argv, []))
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+  on('ui.panes', async () => ({ value: [] }))
+  on('ui.selection', async () => ({ value: selection }))
+  on('prompt.read', async () => ({ value: { text: '', cursor: 0 } }))
+  on('prompt.fill', async (_$, e) => {
+    filled = e.text
+    return { isFilled: true as const, text: e.text }
+  })
+
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE('file-explorer', 120))
+  await ui.press({ key: 'row:src' })
+  await ui.press({ key: 'row:src/util.ts' })
+
+  // From the preview: the file and the lines found for the selection.
+  let ran = await $.command.run({ command: 'quote' } as never)
+  expect(filled).toBe('`src/util.ts` lines 12-14:\n```\nline 12\nline 13\nline 14\n```\n')
+  expect((ran as { text?: string }).text).toBe('Quoted 3 lines of src/util.ts into the prompt.')
+
+  ran = await $.command.run({ command: 'ref' } as never)
+  expect(filled).toBe('@src/util.ts (lines 12-14) ')
+  expect((ran as { text?: string }).text).toBe('Inserted @src/util.ts (lines 12-14).')
+
+  // From the transcript: quoted as a plain selection.
+  selection = { text: 'some reply text', requestId: 'msg-1' }
+  await $.command.run({ command: 'quote' } as never)
+  expect(filled).toBe('Selected:\n```\nsome reply text\n```\n')
+
+  // Nothing selected: said so.
+  selection = undefined
+  ran = await $.command.run({ command: 'quote' } as never)
+  expect((ran as { text?: string }).text).toContain('Select lines with the mouse first')
+})

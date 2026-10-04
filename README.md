@@ -40,6 +40,7 @@ claude --plugin-dir ./file-explorer
 
 ## file-explorer
 
+- `/quote` quotes the mouse selection into the prompt (from the preview, with its file and lines); `/ref` inserts `@file (lines a-b)`. A mouse selection leaves the keyboard with the prompt, so these are the keyboard way; `q`/`r` work once the pane has the keys (`ctrl+x tab`)
 - `/files [files|changes|history|search]` opens the explorer; `/changes [ref | a..b | a...b]` opens the changes view; `/search [text]` searches file contents
 - From 80 columns wide the pane splits: the tree on the left, the open file or diff on the right, each scrolled on its own (the wheel scrolls the column under the pointer). Narrower, the file opens in a pane of its own. `/files` asks the dock for 110 columns; drag it wider or narrower as you like.
 - **Follow** (split view, on by default; `follow` in the sidebar header): when Claude reads a file the preview shows it at the lines read; when Claude edits one it shows the diff at the hunk it changed
