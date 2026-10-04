@@ -1,6 +1,6 @@
 export type ExplorerEntry = { name: string; isDir: boolean; size: number; mtimeMs?: number }
 
-export type ExplorerView = 'files' | 'changes' | 'history' | 'search'
+export type ExplorerView = 'files' | 'changes' | 'history' | 'search' | 'outline'
 
 export type ExplorerHit = { path: string; line: number; column: number; text: string }
 
@@ -76,6 +76,8 @@ declare module 'claude-code' {
       lastPrompt: ExplorerBase | null
       search: ExplorerSearch
       pins: string[]
+      // The outline entry last jumped to: `r` names its lines while it is in view.
+      symbol: { path: string; start: number; end: number } | null
       ignored: string[]
       hideIgnored: boolean
       previewOffset: number

@@ -19,6 +19,8 @@ import { clipDiff, hunkOffset, parseLog, parseNameStatus, sliceHunk, splitHunks 
 import { cleanText, isPlainRelative, oneLine } from './safe'
 import { helpText } from './help'
 import { formatAge, formatSize, isIgnored, parseIgnored } from './details'
+import { hasOutline, outlineOf } from './outline'
+import type { OutlineEntry, OutlineKind } from './outline'
 import type { HelpLanguage } from './help'
 import { buttonCells, fitCount, lastStart, packRows, rowsOf, shiftCells, widest } from './wrap'
 import type { IconStyle } from './icons'
@@ -66,6 +68,7 @@ const search = atom({ plugin: 'file-explorer', key: 'search' } as const, NO_SEAR
 const ignored = atom({ plugin: 'file-explorer', key: 'ignored' } as const, [])
 const hideIgnored = atom({ plugin: 'file-explorer', key: 'hideIgnored' } as const, false)
 const pins = atom({ plugin: 'file-explorer', key: 'pins' } as const, [])
+const symbol = atom({ plugin: 'file-explorer', key: 'symbol' } as const, null)
 const listOffset = atom({ plugin: 'file-explorer', key: 'listOffset' } as const, 0)
 const follow = atom({ plugin: 'file-explorer', key: 'follow' } as const, true)
 const lastPrompt = atom({ plugin: 'file-explorer', key: 'lastPrompt' } as const, null)
@@ -74,7 +77,14 @@ const sideways = atom({ plugin: 'file-explorer', key: 'sideways' } as const, 0)
 const previewOffset = atom({ plugin: 'file-explorer', key: 'previewOffset' } as const, 0)
 
 // The project's file list for name search, read once and dropped on refresh.
-const cache: { files?: string[]; lower?: string[]; turnHead?: string; rootReal?: string } = {}
+const cache: {
+  files?: string[]
+  lower?: string[]
+  turnHead?: string
+  rootReal?: string
+  // The outline of the text last outlined, kept while that text is shown.
+  outline?: { path: string; text: string; entries: OutlineEntry[] }
+} = {}
 
 // What the explorer was last drawn as, so presses know where a file shows.
 const layout = { isSplit: false, sidebarColumns: 0, listRows: 20, previewRows: 20, listTotal: 0, previewTotal: 0, previewLast: 0, icons: 'emoji' as IconStyle, language: 'en' as HelpLanguage, visible: { start: 0, end: 0 } }
@@ -451,6 +461,35 @@ async function openHit($: EngineInterface, hit: ExplorerHit) {
   await focusOn($, `hit:${hit.path}:${hit.line}:${hit.column}`)
 }
 
+// The open file's outline, worked out once per text shown.
+function outlineFor(shown: ExplorerPreview): OutlineEntry[] {
+  const kept = cache.outline
+  if (kept !== undefined && kept.path === shown.path && kept.text === shown.text) return kept.entries
+  const entries = outlineOf(shown.path, shown.text)
+  cache.outline = { path: shown.path, text: shown.text, entries }
+  return entries
+}
+
+// Scrolls the preview to an outline entry, out of a diff into the file.
+async function jumpTo($: EngineInterface, entry: OutlineEntry) {
+  const shown = await read($, preview)
+  if (shown === null) return
+  if (shown.mode === 'diff') await update($, preview, now => (now === null ? now : { ...now, mode: fileMode(now.path) }))
+  await update($, symbol, () => ({ path: shown.path, start: entry.line, end: entry.end }))
+  await update($, previewOffset, () => Math.max(0, entry.line - 1))
+  await focusOn($, `sym:${entry.line}`)
+}
+
+const KIND_MARK: Record<OutlineKind, { glyph: string; color: string }> = {
+  heading: { glyph: '#', color: 'blue' },
+  function: { glyph: 'ƒ', color: 'yellow' },
+  method: { glyph: 'ƒ', color: 'yellow' },
+  class: { glyph: 'C', color: 'cyan' },
+  type: { glyph: 'T', color: 'green' },
+  const: { glyph: 'k', color: 'magenta' },
+  module: { glyph: 'M', color: 'blue' },
+}
+
 // ---- preview -------------------------------------------------------------
 
 async function fileText($: EngineInterface, rel: string, _size?: number) {
@@ -668,8 +707,10 @@ async function refreshAll($: EngineInterface) {
   await reloadPreview($)
 }
 
+const VIEWS = new Set(['files', 'changes', 'history', 'search', 'outline'])
+
 async function openExplorer($: EngineInterface, wanted: string) {
-  if (wanted === 'files' || wanted === 'changes' || wanted === 'history' || wanted === 'search') await update($, view, () => wanted as ExplorerView)
+  if (VIEWS.has(wanted)) await update($, view, () => wanted as ExplorerView)
   await refreshAll($)
   return $.ui.open({ id: EXPLORER, title: 'Explorer', focus: true, columns: SPLIT_COLUMNS })
 }
@@ -797,6 +838,11 @@ async function pickedLines($: EngineInterface, shown: ExplorerPreview): Promise<
     }
     if (at >= 0) return { start: at + 1, end: at + rows.length, text }
     return { start: 0, end: 0, text }
+  }
+  // The symbol jumped to from the outline, while its first line shows.
+  const chosen = await read($, symbol)
+  if (chosen !== null && chosen.path === shown.path && chosen.start >= layout.visible.start && chosen.start <= layout.visible.end) {
+    return { start: chosen.start, end: chosen.end }
   }
   return { ...layout.visible }
 }
@@ -931,6 +977,7 @@ async function drawSidebar(
     tab('changes', `${isRoomy ? 'Changes' : 'Chg'} ${list.length}`, 'c'),
     tab('history', isRoomy ? 'History' : 'Log', 'h'),
     tab('search', isRoomy ? 'Search' : 'Find', 's'),
+    tab('outline', isRoomy ? 'Outline' : 'Out', 't'),
     {
       key: 'ignored',
       cells: buttonCells('⊘', true),
@@ -1054,6 +1101,42 @@ async function drawSidebar(
         ),
       }
     })
+  } else if (current === 'outline') {
+    const shown = await read($, preview)
+    if (shown === null || shown.isHelp === true || shown.text === '') {
+      extra.push(<Text dimColor>Open a file to see its outline.</Text>)
+    } else if (!hasOutline(shown.path)) {
+      extra.push(<Text dimColor>No outline for this kind of file.</Text>)
+    } else {
+      const entries = outlineFor(shown)
+      if (entries.length === 0) extra.push(<Text dimColor>No symbols or headings found.</Text>)
+      // The entry the preview's top line sits in, deepest first.
+      const top = (await read($, previewOffset)) + 1
+      let here = -1
+      entries.forEach((entry, i) => {
+        if (entry.line <= top && top <= entry.end) here = i
+      })
+      lines = entries.map((entry, i) => {
+        const indent = '  '.repeat(Math.min(entry.depth, 6))
+        const mark = KIND_MARK[entry.kind]
+        const number = String(entry.line)
+        const room = width - 4 - indent.length - number.length - 1
+        return {
+          key: `sym:${entry.line}`,
+          node: () => (
+            <Box key={`symline:${entry.line}`} flexDirection="row">
+              <Text color="blue">{i === here ? '▌' : ' '}</Text>
+              <Text dimColor>{indent}</Text>
+              <Text color={mark.color}>{mark.glyph} </Text>
+              <Button key={`sym:${entry.line}`} label={fit(entry.name, room)} plain
+                onPress={() => jumpTo($, entry)} />
+              <Box flexGrow={1} />
+              <Text dimColor> {number}</Text>
+            </Box>
+          ),
+        }
+      })
+    }
   } else if (current === 'changes') {
     const failed = await read($, gitError)
     fixed += Input === undefined ? 1 : 2
@@ -1551,7 +1634,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'files',
       description: 'Open the file explorer',
-      argumentHint: '[files|changes|history|search|help]',
+      argumentHint: '[files|changes|history|search|outline|help]',
     })
     // A mouse selection leaves the keys with the prompt, where the pane's
     // q and r never arrive: these do the same from the prompt.

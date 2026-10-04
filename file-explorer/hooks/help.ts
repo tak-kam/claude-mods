@@ -10,7 +10,7 @@ Keys work while the explorer has the keyboard: click it, or press \`ctrl+x tab\`
 
 | Key | Does |
 | --- | --- |
-| \`f\` \`c\` \`h\` \`s\` | Files, Changes, History, Search tab |
+| \`f\` \`c\` \`h\` \`s\` \`t\` | Files, Changes, History, Search, Outline tab |
 | \`▲\` \`▼\` | Scroll the list (the wheel too) |
 | \`↻\` | Refresh |
 | \`⊟\` | Collapse every folder |
@@ -31,7 +31,7 @@ In **Changes**, press the base (\`vs HEAD\`) to cycle HEAD, the last prompt and 
 | \`w\` | Wrap long lines, or cut them at the edge |
 | \`◀\` \`▶\` | Scroll sideways, with wrapping off (click) |
 | \`q\` | Quote the mouse selection into the prompt |
-| \`r\` | Insert \`@file (lines a-b)\`: the selection, else the lines in view |
+| \`r\` | Insert \`@file (lines a-b)\`: the selection, else the outline symbol jumped to, else the lines in view |
 | \`y\` | Copy the file's path |
 | \`b\` | Pin or unpin the file (pins list at the top of Files, kept per project) |
 | \`❝ quote\` | Quote one diff hunk (click) |
@@ -40,11 +40,15 @@ In **Changes**, press the base (\`vs HEAD\`) to cycle HEAD, the last prompt and 
 
 **Name** filters file names as you type; Enter opens the best match. **Text** runs ripgrep on Enter: \`Aa\` matches case, \`.*\` takes a regex, and a line number opens the file there.
 
+## Outline
+
+The open file's functions, classes and types (TypeScript, JavaScript, Python, Go, Rust) or its markdown headings. Press one to scroll the preview to it; \`r\` then names that symbol's lines.
+
 ## Commands
 
 | Command | Does |
 | --- | --- |
-| \`/files [files\\|changes\\|history\\|search\\|help]\` | Open the explorer |
+| \`/files [files\\|changes\\|history\\|search\\|outline\\|help]\` | Open the explorer |
 | \`/changes [ref \\| a..b \\| a...b \\| turn]\` | Changes against a base |
 | \`/search text\` | Search file contents |
 | \`/quote\` | Quote the mouse selection |
@@ -63,7 +67,7 @@ export const HELP_JA = `# キーとコマンド
 
 | キー | 動作 |
 | --- | --- |
-| \`f\` \`c\` \`h\` \`s\` | Files、Changes、History、Search タブ |
+| \`f\` \`c\` \`h\` \`s\` \`t\` | Files、Changes、History、Search、Outline タブ |
 | \`▲\` \`▼\` | 一覧のスクロール（ホイールでも可） |
 | \`↻\` | 再読み込み |
 | \`⊟\` | フォルダをすべて閉じる |
@@ -84,7 +88,7 @@ export const HELP_JA = `# キーとコマンド
 | \`w\` | 長い行を折り返す・画面端で切る |
 | \`◀\` \`▶\` | 横スクロール（折り返しオフのとき、クリック） |
 | \`q\` | マウスで選択した範囲をプロンプトに引用 |
-| \`r\` | \`@file (lines a-b)\` を入れる（選択範囲、なければ表示中の行） |
+| \`r\` | \`@file (lines a-b)\` を入れる（選択範囲、なければアウトラインで飛んだシンボル、なければ表示中の行） |
 | \`y\` | ファイルのパスをコピー |
 | \`b\` | ファイルをピン留め・解除（Files の一番上に並び、プロジェクトごとに保存） |
 | \`❝ quote\` | diff のまとまりを 1 つ引用（クリック） |
@@ -93,11 +97,15 @@ export const HELP_JA = `# キーとコマンド
 
 **Name** は入力に合わせてファイル名を絞り込み、Enter で一番近いものを開きます。**Text** は Enter で ripgrep を実行します。\`Aa\` で大文字小文字を区別、\`.*\` で正規表現、行番号を押すとその行で開きます。
 
+## アウトライン
+
+開いているファイルの関数・クラス・型（TypeScript、JavaScript、Python、Go、Rust）や Markdown の見出しの一覧です。押すとプレビューがそこまでスクロールし、続けて \`r\` を押すとそのシンボルの行範囲を入れます。
+
 ## コマンド
 
 | コマンド | 動作 |
 | --- | --- |
-| \`/files [files\\|changes\\|history\\|search\\|help]\` | エクスプローラーを開く |
+| \`/files [files\\|changes\\|history\\|search\\|outline\\|help]\` | エクスプローラーを開く |
 | \`/changes [ref \\| a..b \\| a...b \\| turn]\` | 基準と比べた変更を表示 |
 | \`/search 文字列\` | ファイルの中身を検索 |
 | \`/quote\` | マウスで選択した範囲を引用 |

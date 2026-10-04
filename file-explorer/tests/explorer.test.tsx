@@ -1063,3 +1063,81 @@ test('shows sizes and ages, and dims or hides what git ignores', async ($, on) =
   const narrow = await $.ui.mount(PANE('file-explorer', 30))
   expect(await narrow.find({ type: 'Text', text: ' 812 5m' })).toBeUndefined()
 })
+
+test('outlines the open file and jumps to a symbol, which r then names', async ($, on) => {
+  const filler = (n: number) => Array.from({ length: n }, (_, i) => `  // step ${i + 1}`)
+  const code = [
+    'import { x } from "y"',
+    'export function first() {',
+    ...filler(40),
+    '}',
+    '',
+    'export class Store {',
+    '  load(key: string) {',
+    ...filler(40),
+    '  }',
+    '}',
+    '',
+  ].join('\n')
+  const readme = ['# Title', 'intro', '## Usage', ...Array.from({ length: 60 }, () => 'text'), '## Notes', 'end', ''].join('\n')
+  let filled = ''
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('fs.stat', async (_$, e) => STAT(e.path))
+  on('fs.list', async (_$, e) => ({
+    value: (TREE[e.path] ?? []).map(one => ({ ...one, mtimeMs: 0, isLink: false })),
+  }))
+  on('fs.read', async (_$, e) => ({ value: e.path.endsWith('.md') ? readme : code }))
+  on('process.run', async (_$, e) => fakeGit(e.argv, []))
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+  on('ui.panes', async () => ({ value: [] }))
+  on('ui.selection', async () => ({ value: undefined }))
+  on('prompt.read', async () => ({ value: { text: '', cursor: 0 } }))
+  on('prompt.fill', async (_$, e) => {
+    filled = e.text
+    return { isFilled: true as const, text: e.text }
+  })
+
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE('file-explorer', 120))
+
+  // Nothing open yet: the tab says what it needs.
+  await ui.press({ key: 'tab:outline' })
+  expect(await ui.find({ text: 'Open a file to see its outline.' })).toBeDefined()
+
+  // A changed file opens as its diff; the outline jumps into the file itself.
+  await ui.press({ key: 'tab:files' })
+  await ui.press({ key: 'row:src' })
+  await ui.press({ key: 'row:src/main.ts' })
+  await ui.press({ key: 'mode:diff' })
+  await ui.press({ key: 'tab:outline' })
+  expect((await ui.find({ key: 'sym:2' }))?.props.label).toBe('first')
+  expect((await ui.find({ key: 'sym:45' }))?.props.label).toBe('Store')
+  expect((await ui.find({ key: 'sym:46' }))?.props.label).toBe('load')
+
+  await ui.press({ key: 'sym:46' })
+  const shown = await ui.find({ type: 'Code' })
+  expect(shown?.props.format).not.toBe('diff')
+  expect(shown?.props.startLine).toBe(46)
+
+  // r names the symbol's lines while it is in view, else the lines shown.
+  await ui.press({ key: 'ref' })
+  expect(filled).toBe('@src/main.ts (lines 46-87) ')
+  await ui.press({ key: 'sym:2' })
+  await ui.press({ key: 'ref' })
+  expect(filled).toBe('@src/main.ts (lines 2-43) ')
+
+  // Markdown: the headings, nested under the top one.
+  await ui.press({ key: 'tab:files' })
+  await ui.press({ key: 'row:README.md' })
+  await ui.press({ key: 'tab:outline' })
+  expect((await ui.find({ key: 'sym:3' }))?.props.label).toBe('Usage')
+  await ui.press({ key: 'sym:64' })
+  expect(await ui.find({ key: 'sym:64' })).toBeDefined()
+
+  // A file with no outline says so; /files outline opens the tab.
+  await ui.press({ key: 'tab:files' })
+  await ui.press({ key: 'row:src/util.ts' })
+  await $.command.run({ command: 'files', args: 'outline' } as never)
+  expect(await ui.find({ key: 'sym:2' })).toBeDefined()
+})
