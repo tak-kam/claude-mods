@@ -720,3 +720,49 @@ test('compares commit ranges and refuses unknown refs', async ($, on) => {
   await ui.input({ key: 'base-ref', text: '' })
   expect((await ui.find({ key: 'base' }))?.text).toBe('HEAD')
 })
+
+test('wraps long lines by default, or cuts them and scrolls sideways', async ($, on) => {
+  const long = `const value = ${'x'.repeat(200)}\n`
+  const text = Array.from({ length: 40 }, (_, i) => (i % 2 === 0 ? long : `short ${i}\n`)).join('')
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('fs.stat', async (_$, e) => STAT(e.path))
+  on('fs.list', async (_$, e) => ({
+    value: (TREE[e.path] ?? []).map(one => ({ ...one, mtimeMs: 0, isLink: false })),
+  }))
+  on('fs.read', async () => ({ value: text }))
+  on('process.run', async (_$, e) => fakeGit(e.argv, []))
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+  on('ui.panes', async () => ({ value: [] }))
+
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE('file-explorer', 120))
+  await ui.press({ key: 'row:src' })
+  await ui.press({ key: 'row:src/util.ts' })
+
+  // Wrapped: each long line takes several rows, so fewer lines fit the 30-row pane.
+  let code = await ui.find({ type: 'Code' })
+  expect(code?.props.wrap).toBe('wrap')
+  const wrappedLines = String(code?.props.source).trimEnd().split('\n').length
+  expect(wrappedLines).toBeLessThan(20)
+
+  // Scrolling to the end still shows the last line.
+  for (let i = 0; i < 20; i++) await ui.press({ key: 'down' })
+  code = await ui.find({ type: 'Code' })
+  expect(String(code?.props.source).trimEnd().endsWith('short 39')).toBe(true)
+
+  // Unwrapped: one row a line, cut at the edge, and scrollable sideways.
+  await ui.press({ key: 'wrap' })
+  await ui.press({ key: 'up' })
+  for (let i = 0; i < 5; i++) await ui.press({ key: 'up' })
+  code = await ui.find({ type: 'Code' })
+  expect(code?.props.wrap).toBe('truncate-end')
+  expect(code?.props.startLine).toBe(1)
+  expect(String(code?.props.source).startsWith('const value = ')).toBe(true)
+  await ui.press({ key: 'right' })
+  code = await ui.find({ type: 'Code' })
+  expect(String(code?.props.source).startsWith('const value = ')).toBe(false)
+  expect(String(code?.props.source).startsWith('x')).toBe(true)
+  await ui.press({ key: 'left' })
+  expect(String((await ui.find({ type: 'Code' }))?.props.source).startsWith('const value = ')).toBe(true)
+})
