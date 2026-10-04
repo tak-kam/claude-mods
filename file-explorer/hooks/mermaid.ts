@@ -24,10 +24,10 @@ export function diagramKey(source: string): string {
 
 // Where the drawings are kept, per person: XDG's cache, else the home's
 // .cache, else Windows' local app data.
-export function cacheFolder(env: { xdg?: string; home?: string; localAppData?: string }): string | undefined {
-  if (env.xdg !== undefined && env.xdg.startsWith('/')) return `${env.xdg}/claude-file-explorer/mermaid`
-  if (env.localAppData !== undefined && env.localAppData !== '') return `${env.localAppData.replace(/\\/g, '/')}/claude-file-explorer/mermaid`
-  if (env.home !== undefined && env.home !== '') return `${env.home.replace(/\\/g, '/')}/.cache/claude-file-explorer/mermaid`
+export function cacheFolder(env: { xdg?: string; home?: string; localAppData?: string }, kind = 'mermaid'): string | undefined {
+  if (env.xdg !== undefined && env.xdg.startsWith('/')) return `${env.xdg}/claude-file-explorer/${kind}`
+  if (env.localAppData !== undefined && env.localAppData !== '') return `${env.localAppData.replace(/\\/g, '/')}/claude-file-explorer/${kind}`
+  if (env.home !== undefined && env.home !== '') return `${env.home.replace(/\\/g, '/')}/.cache/claude-file-explorer/${kind}`
   return undefined
 }
 

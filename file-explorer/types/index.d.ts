@@ -104,6 +104,10 @@ declare module 'claude-code' {
       // mmdc answered at all.
       diagrams: Record<string, ExplorerDiagram>
       mermaidTool: 'unknown' | 'yes' | 'no'
+      // JPEG/GIF/WebP and SVG converted to PNG for the terminal, by a key of
+      // path, time and size; the converters found (null: not looked yet).
+      pictures: Record<string, ExplorerDiagram>
+      converters: { raster?: 'sips' | 'ffmpeg' | 'magick' | 'convert'; svg?: 'rsvg-convert' } | null
       dataView: { path: string; toggled: string[]; pick: string }
       ignored: string[]
       hideIgnored: boolean
