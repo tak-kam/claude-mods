@@ -812,3 +812,38 @@ test('keeps every toolbar Button inside the pane, so every hotkey is live', asyn
     await ui.unmount()
   }
 })
+
+test('never lets the search field grab the focus by itself', async ($, on) => {
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('fs.stat', async (_$, e) => STAT(e.path))
+  on('fs.list', async (_$, e) => ({
+    value: (TREE[e.path] ?? []).map(one => ({ ...one, mtimeMs: 0, isLink: false })),
+  }))
+  on('fs.read', async () => ({ value: 'export const answer = 42\n' }))
+  on('process.run', async (_$, e) => {
+    if (e.argv[0] === 'rg') {
+      return e.argv[1] === '--files' ? ok('src/main.ts\0src/util.ts\0') : ok('src/main.ts\x001:14:export const answer = 42\n')
+    }
+    return fakeGit(e.argv, [])
+  })
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+  on('ui.panes', async () => ({ value: [] }))
+
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE('file-explorer', 120))
+
+  // No autoFocus: a pane taking the keys starts on nothing, where the
+  // toolbar's hotkeys work; the field takes the ring only from the search tab.
+  // (The test kit does not model the ring, so where it moves is not asserted.)
+  await ui.press({ key: 'tab:search' })
+  expect((await ui.find({ key: 'search-input' }))?.props.autoFocus).toBeUndefined()
+
+  // Enter opens the best match; a text search's Enter lists hits and a hit opens at its line.
+  await ui.input({ key: 'search-input', text: 'main' })
+  expect((await ui.find({ type: 'Code' }))?.props.path).toBe('src/main.ts')
+  await ui.press({ key: 'search:text' })
+  await ui.input({ key: 'search-input', text: 'answer' })
+  await ui.press({ key: 'hit:src/main.ts:1:14' })
+  expect((await ui.find({ type: 'Code' }))?.props.path).toBe('src/main.ts')
+})

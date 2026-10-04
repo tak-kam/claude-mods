@@ -427,9 +427,22 @@ async function toggleSearchFlag($: EngineInterface, flag: 'isRegex' | 'isCaseSen
   if (now.mode === 'text' && now.query.trim() !== '') await searchText($, now.query)
 }
 
+// Moves the explorer's focus ring onto one of its elements. Off the search
+// field, a letter is the toolbar's hotkey again instead of a typed key.
+async function focusOn($: EngineInterface, key: string) {
+  await $.ui.focus({ requestId: EXPLORER, key }).catch(() => undefined)
+}
+
+// Opens a search result and leaves the focus on its row, out of the field.
+async function openFound($: EngineInterface, path: string) {
+  await showPath($, path, { mode: fileMode(path) })
+  await focusOn($, `found:${path}`)
+}
+
 async function openHit($: EngineInterface, hit: ExplorerHit) {
   await showPath($, hit.path, { mode: 'file' })
   await update($, previewOffset, () => Math.max(0, hit.line - 4))
+  await focusOn($, `hit:${hit.path}:${hit.line}:${hit.column}`)
 }
 
 // ---- preview -------------------------------------------------------------
@@ -761,7 +774,6 @@ async function drawSearchControls(
         <Input
           key="search-input"
           placeholder={isText ? 'text in files (Enter)' : 'file name'}
-          autoFocus
           onInput={async (value: string) => {
             if (isText) await update($, search, now => ({ ...now, query: value }))
             else await searchFiles($, value)
@@ -769,10 +781,15 @@ async function drawSearchControls(
             await $.ui.focus({ requestId: EXPLORER, key: 'search-input' }).catch(() => undefined)
           }}
           onSubmit={async (value: string) => {
-            if (isText) return searchText($, value)
+            if (isText) {
+              await searchText($, value)
+              const first = (await read($, search)).hits[0]
+              if (first !== undefined) await focusOn($, `hit:${first.path}:${first.line}:${first.column}`)
+              return
+            }
             await searchFiles($, value)
             const first = (await read($, search)).files[0]
-            if (first !== undefined) await showPath($, first, { mode: fileMode(first) })
+            if (first !== undefined) await openFound($, first)
           }}
         />
       )}
@@ -808,7 +825,11 @@ async function drawSidebar(
     cells: buttonCells(label, true),
     draw: () => (
       <Button key={`tab:${key}`} label={label} plain hotkey={hotkey} dimColor={current === key ? undefined : true}
-        onPress={() => update($, view, () => key)} />
+        onPress={async () => {
+          await update($, view, () => key)
+          // The search tab is for typing: its field takes the focus, and only then.
+          if (key === 'search') await focusOn($, 'search-input')
+        }} />
     ),
   })
   const tabItems: Tab[] = [
@@ -858,7 +879,7 @@ async function drawSidebar(
             <Box key={`line:${path}`} flexDirection="row">
               <Text color="blue">{path === chosen ? '▌' : ' '}</Text>
               {icon.glyph !== '' && <Text color={icon.color}>{icon.glyph}</Text>}
-              <Button key={`found:${path}`} label={label} plain onPress={() => showPath($, path, { mode: fileMode(path) })} />
+              <Button key={`found:${path}`} label={label} plain onPress={() => openFound($, path)} />
               {parentOf(path) !== '' && rest > 3 && <Text dimColor> {fit(parentOf(path), rest)}</Text>}
             </Box>
           ),
