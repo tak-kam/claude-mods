@@ -1204,3 +1204,86 @@ test('opens CSV as a table and JSON as a tree, with the source a key away', asyn
   await ui.press({ key: 'row:bad.json' })
   expect(await ui.find({ type: 'Text', text: "Not valid JSON: expected ':' at line 3, column 7." })).toBeDefined()
 })
+
+test("shows a file's own history and its blame, each commit a press away", async ($, on) => {
+  const A = 'a'.repeat(40)
+  const B = 'b'.repeat(40)
+  const Z = '0'.repeat(40)
+  const blameOut = [
+    `${A} 1 1 2`, 'author Alice', 'author-time 1000', 'summary Start', 'filename src/main.ts', '\tone',
+    `${A} 2 2`, '\ttwo',
+    `${B} 3 3 1`, 'author Bob \u001b[31m', 'author-time 2000', 'summary Fix', 'filename src/main.ts', '\tthree',
+    `${Z} 4 4 1`, 'author Not Committed Yet', 'author-time 3000', 'summary Version', 'filename src/main.ts', '\tfour',
+    '',
+  ].join('\n')
+  const fileLog = `\x1e${B}\x1fbbbbbbb\x1fFix it\x1fBob\x1f1 day ago\x1f\n\nsrc/main.ts\n\x1e${A}\x1faaaaaaa\x1fStart\x1fAlice\x1f2 days ago\x1f\n\nsrc/main.ts\n`
+  const argvs: string[][] = []
+  let blames = 0
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('clock.now', async () => ({ value: 1_000_000_000 }))
+  on('fs.stat', async (_$, e) => STAT(e.path))
+  on('fs.list', async (_$, e) => ({
+    value: (TREE[e.path] ?? []).map(one => ({ ...one, mtimeMs: 0, isLink: false })),
+  }))
+  on('fs.read', async () => ({ value: 'one\ntwo\nthree\nfour\n' }))
+  on('process.run', async (_$, e) => {
+    argvs.push([...e.argv])
+    const line = gitArgs(e.argv).join(' ')
+    if (line.startsWith('log --follow')) return ok(fileLog)
+    if (line.startsWith('blame ')) {
+      blames++
+      return ok(blameOut)
+    }
+    return fakeGit(e.argv, [])
+  })
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+  on('ui.panes', async () => ({ value: [{ id: 'file-explorer', title: 'Explorer', isShown: true, isFocused: true, isPlaced: true }] }))
+  on('ui.toast', async () => ({ value: undefined }))
+
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE('file-explorer', 140))
+  await ui.press({ key: 'row:src' })
+  await ui.press({ key: 'row:src/main.ts' })
+
+  // Blame from the diff: the source, cut not wrapped, a label per run.
+  await ui.press({ key: 'blame' })
+  const code = await ui.find({ type: 'Code' })
+  expect(code?.props.format).not.toBe('diff')
+  expect(code?.props.wrap).toBe('truncate-end')
+  expect((await ui.find({ key: 'blamed:1' }))?.props.label).toBe('aaaaaaa')
+  expect(await ui.find({ key: 'blamed:2' })).toBeUndefined()
+  expect((await ui.find({ key: 'blamed:3' }))?.props.label).toBe('bbbbbbb')
+  expect((await ui.find({ key: 'blamed:4' }))?.props.label).toBe('·······')
+  expect(await ui.find({ text: /Alice/ })).toBeDefined()
+  expect(await ui.find({ text: /Bob \?\[31m/ })).toBeDefined()
+  expect(await ui.find({ text: /uncommitted/ })).toBeDefined()
+  const run = argvs.find(argv => argv.includes('blame'))
+  expect(run).toContain('--no-textconv')
+  expect(run).toContain('core.fsmonitor=false')
+  expect(run?.slice(-2)).toEqual(['--', 'src/main.ts'])
+
+  // Off and on again: the run is kept while file and HEAD stay the same.
+  await ui.press({ key: 'blame' })
+  expect(await ui.find({ key: 'blamed:1' })).toBeUndefined()
+  await ui.press({ key: 'blame' })
+  expect(await ui.find({ key: 'blamed:1' })).toBeDefined()
+  expect(blames).toBe(1)
+
+  // A blamed commit opens with this file's diff in it.
+  await ui.press({ key: 'blamed:3' })
+  expect((await ui.find({ key: 'tab:changes' }))?.props.dimColor).toBeUndefined()
+  expect((await ui.find({ type: 'Code' }))?.props.format).toBe('diff')
+
+  // The file's history narrows the History tab; ✕ widens it again.
+  await ui.press({ key: 'log' })
+  expect(await ui.find({ key: 'history:all' })).toBeDefined()
+  expect((await ui.find({ key: `commit:${B}` }))?.props.label).toBe('Fix it')
+  expect(argvs.some(argv => argv.includes('--follow') && argv[argv.length - 1] === 'src/main.ts')).toBe(true)
+  await ui.press({ key: `commit:${A}` })
+  expect((await ui.find({ type: 'Code' }))?.props.format).toBe('diff')
+  await ui.press({ key: 'tab:history' })
+  await ui.press({ key: 'history:all' })
+  expect(await ui.find({ key: 'history:all' })).toBeUndefined()
+  expect(await ui.find({ key: 'commit:aaaa' })).toBeDefined()
+})

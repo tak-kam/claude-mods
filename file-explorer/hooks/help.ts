@@ -34,6 +34,8 @@ In **Changes**, press the base (\`vs HEAD\`) to cycle HEAD, the last prompt and 
 | \`r\` | Insert \`@file (lines a-b)\`: the selection, else the outline symbol jumped to or the JSON node picked, else the lines in view |
 | \`y\` | Copy the file's path |
 | \`b\` | Pin or unpin the file (pins list at the top of Files, kept per project) |
+| \`l\` | The file's history in the History tab (renames followed); a commit opens its diff of the file |
+| \`a\` | Blame: who last changed each line, and when, beside the source; a commit id opens it |
 | \`❝ quote\` | Quote one diff hunk (click) |
 
 ## Search
@@ -95,6 +97,8 @@ export const HELP_JA = `# キーとコマンド
 | \`r\` | \`@file (lines a-b)\` を入れる（選択範囲、なければアウトラインで飛んだシンボルか選んだ JSON の要素、なければ表示中の行） |
 | \`y\` | ファイルのパスをコピー |
 | \`b\` | ファイルをピン留め・解除（Files の一番上に並び、プロジェクトごとに保存） |
+| \`l\` | このファイルの履歴を History タブに出す（名前の変更も追う）。コミットを押すとそのファイルの差分を開く |
+| \`a\` | Blame：各行を最後に変えた人と時期をソースの横に出す。コミット ID を押すとそのコミットを開く |
 | \`❝ quote\` | diff のまとまりを 1 つ引用（クリック） |
 
 ## 検索

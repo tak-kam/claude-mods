@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { clipDiff, hunkOffset, letterOf, parseLog, parseNameStatus, sliceHunk, splitHunks } from '../hooks/diff'
+import { clipDiff, hunkOffset, letterOf, parseLog, parseNameStatus, sliceHunk, splitHunks, parseBlame, parseFileLog, UNCOMMITTED } from '../hooks/diff'
 
 describe('letterOf', () => {
   test('maps git status codes to the letters drawn', () => {
@@ -137,5 +137,51 @@ describe('hunkOffset', () => {
   test('falls back to the top for a line in no hunk', () => {
     expect(hunkOffset(HUNKS, 999)).toBe(0)
     expect(hunkOffset('', 3)).toBe(0)
+  })
+})
+
+describe('parseFileLog', () => {
+  test('each commit with the path the file had in it', () => {
+    const A = 'a'.repeat(40)
+    const B = 'b'.repeat(40)
+    const raw = `\x1e${A}\x1faaaaaaa\x1fRename\x1fBob\x1f1 day ago\x1f\n\nsrc/new.ts\n\x1e${B}\x1fbbbbbbb\x1fAdd \u001b[2J\x1fAl\nice\x1f2 days ago\x1f\n\nold.ts\n\x1e${A}\x1fx\x1fq\x1fz\x1fw\x1f\n\n"odd\\tname"\n`
+    expect(parseFileLog(raw)).toEqual([
+      { sha: A, short: 'aaaaaaa', subject: 'Rename', author: 'Bob', when: '1 day ago', path: 'src/new.ts' },
+      { sha: B, short: 'bbbbbbb', subject: 'Add ?[2J', author: 'Al?ice', when: '2 days ago', path: 'old.ts' },
+      { sha: A, short: 'x', subject: 'q', author: 'z', when: 'w', path: '' },
+    ])
+  })
+})
+
+describe('parseBlame', () => {
+  const C = 'c38d4af9e656035c6efdcf2b3a71d2d2ba850bf4'
+  const raw = [
+    `${C} 1 1 2`,
+    'author Bob',
+    'author-mail <b@x>',
+    'author-time 1791091568',
+    'summary second \u001b]0;x\u0007',
+    'filename b.txt',
+    '\tone',
+    `${C} 2 2`,
+    '\tauthor fake-looking content',
+    `${UNCOMMITTED} 3 3 1`,
+    'author Not Committed Yet',
+    'author-time 1791091569',
+    'summary Version of b.txt from b.txt',
+    'filename b.txt',
+    '\tzero',
+    '',
+  ].join('\n')
+
+  test('details once per commit, a sha per line, content lines ignored', () => {
+    const { commits, shas } = parseBlame(raw, 100)
+    expect(shas).toEqual([C, C, UNCOMMITTED])
+    expect(commits[C]).toEqual({ short: 'c38d4af', author: 'Bob', time: 1791091568, summary: 'second ?]0;x?' })
+    expect(commits[UNCOMMITTED]?.author).toBe('Not Committed Yet')
+  })
+
+  test('stops at the line limit', () => {
+    expect(parseBlame(raw, 2).shas).toEqual([C, C])
   })
 })
