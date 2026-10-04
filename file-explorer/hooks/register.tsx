@@ -20,6 +20,8 @@ import { cleanText, isPlainRelative, oneLine } from './safe'
 import { helpText } from './help'
 import { formatAge, formatSize, isIgnored, parseIgnored } from './details'
 import { hasOutline, outlineOf } from './outline'
+import { isDelimited, isJson, isJsonLines, jsonRows, parseDelimited, parseJson, parseJsonLines, tableLines } from './data'
+import type { JsonNode, JsonRow } from './data'
 import type { OutlineEntry, OutlineKind } from './outline'
 import type { HelpLanguage } from './help'
 import { buttonCells, fitCount, lastStart, packRows, rowsOf, shiftCells, widest } from './wrap'
@@ -69,6 +71,7 @@ const ignored = atom({ plugin: 'file-explorer', key: 'ignored' } as const, [])
 const hideIgnored = atom({ plugin: 'file-explorer', key: 'hideIgnored' } as const, false)
 const pins = atom({ plugin: 'file-explorer', key: 'pins' } as const, [])
 const symbol = atom({ plugin: 'file-explorer', key: 'symbol' } as const, null)
+const dataView = atom({ plugin: 'file-explorer', key: 'dataView' } as const, { path: '', toggled: [], pick: '' })
 const listOffset = atom({ plugin: 'file-explorer', key: 'listOffset' } as const, 0)
 const follow = atom({ plugin: 'file-explorer', key: 'follow' } as const, true)
 const lastPrompt = atom({ plugin: 'file-explorer', key: 'lastPrompt' } as const, null)
@@ -84,6 +87,8 @@ const cache: {
   rootReal?: string
   // The outline of the text last outlined, kept while that text is shown.
   outline?: { path: string; text: string; entries: OutlineEntry[] }
+  // The data file last parsed, kept while that text is shown.
+  data?: { path: string; text: string; parsed: ParsedData }
 } = {}
 
 // What the explorer was last drawn as, so presses know where a file shows.
@@ -490,6 +495,56 @@ const KIND_MARK: Record<OutlineKind, { glyph: string; color: string }> = {
   module: { glyph: 'M', color: 'blue' },
 }
 
+type ParsedData =
+  | { kind: 'table'; lines: ReturnType<typeof tableLines>; isCut: boolean }
+  | { kind: 'tree'; root: JsonNode }
+  | { kind: 'error'; text: string; line: number }
+
+const MAX_DATA_RECORDS = 5000
+const MAX_DATA_ROWS = 5000
+const MAX_CELL = 40
+
+// The shown data file parsed, once per text.
+function dataFor(shown: ExplorerPreview): ParsedData {
+  const kept = cache.data
+  if (kept !== undefined && kept.path === shown.path && kept.text === shown.text) return kept.parsed
+  let parsed: ParsedData
+  if (isDelimited(shown.path)) {
+    const delimiter = /\.csv$/i.test(shown.path) ? ',' : '\t'
+    const { records, isCut } = parseDelimited(shown.text, delimiter, MAX_DATA_RECORDS)
+    parsed = { kind: 'table', lines: tableLines(records, MAX_CELL), isCut }
+  } else if (isJsonLines(shown.path)) {
+    parsed = { kind: 'tree', root: parseJsonLines(shown.text, MAX_DATA_RECORDS) }
+  } else {
+    const result = parseJson(shown.text)
+    parsed = 'root' in result
+      ? { kind: 'tree', root: result.root }
+      : { kind: 'error', text: `Not valid JSON: ${result.error} at line ${result.line}, column ${result.column}.`, line: result.line }
+  }
+  cache.data = { path: shown.path, text: shown.text, parsed }
+  return parsed
+}
+
+// Picks a JSON node, and folds or unfolds it when it holds others.
+async function pickNode($: EngineInterface, path: string, row: JsonRow) {
+  await update($, dataView, now => {
+    const toggled = now.path === path ? now.toggled : []
+    const flipped = row.isOpen === undefined
+      ? toggled
+      : toggled.includes(row.path) ? toggled.filter(one => one !== row.path) : [...toggled, row.path]
+    return { path, toggled: flipped, pick: row.path }
+  })
+  await focusOn($, `json:${row.path}`)
+}
+
+const JSON_COLOR: Record<string, string | undefined> = {
+  string: 'green',
+  number: 'cyan',
+  boolean: 'magenta',
+  null: undefined,
+  error: 'red',
+}
+
 // ---- preview -------------------------------------------------------------
 
 async function fileText($: EngineInterface, rel: string, _size?: number) {
@@ -520,7 +575,8 @@ async function fileText($: EngineInterface, rel: string, _size?: number) {
 const isMarkdown = (rel: string) => /\.(md|mdx|markdown)$/i.test(rel)
 
 // What a file opens as from the tree: markdown rendered, the rest as source.
-const fileMode = (rel: string): ExplorerMode => (isMarkdown(rel) ? 'rendered' : 'file')
+const isData = (rel: string) => isDelimited(rel) || isJson(rel)
+const fileMode = (rel: string): ExplorerMode => (isMarkdown(rel) ? 'rendered' : isData(rel) ? 'data' : 'file')
 
 async function showPath($: EngineInterface, rel: string, options: { mode?: ExplorerMode; size?: number } = {}) {
   await update($, selected, () => rel)
@@ -535,7 +591,7 @@ async function showPath($: EngineInterface, rel: string, options: { mode?: Explo
         : await fileText($, rel, options.size)
   const diff = change === undefined ? { diff: '', note: '' } : await diffOf($, change)
   const asked = options.mode ?? (change === undefined ? fileMode(rel) : 'diff')
-  const wanted = asked === 'rendered' && !isMarkdown(rel) ? 'file' : asked
+  const wanted = (asked === 'rendered' && !isMarkdown(rel)) || (asked === 'data' && !isData(rel)) ? 'file' : asked
   const mode = change === undefined ? (wanted === 'diff' ? fileMode(rel) : wanted) : file.isOnDisk ? wanted : 'diff'
   const shown: ExplorerPreview = {
     path: rel,
@@ -819,7 +875,7 @@ async function followTool($: EngineInterface, tool: string, args: Record<string,
 
 // The lines a reference names: the mouse selection's (by the gutter's
 // numbers, else found in the file), else the lines the preview shows.
-async function pickedLines($: EngineInterface, shown: ExplorerPreview): Promise<{ start: number; end: number; text?: string }> {
+async function pickedLines($: EngineInterface, shown: ExplorerPreview): Promise<{ start: number; end: number; text?: string; at?: string }> {
   const picked = await $.ui.selection()
   const text = picked?.text ?? ''
   if (text.trim() !== '') {
@@ -839,6 +895,11 @@ async function pickedLines($: EngineInterface, shown: ExplorerPreview): Promise<
     if (at >= 0) return { start: at + 1, end: at + rows.length, text }
     return { start: 0, end: 0, text }
   }
+  // The JSON node picked in the tree.
+  const data = await read($, dataView)
+  if (shown.mode === 'data' && data.path === shown.path && data.pick !== '') {
+    return { start: 0, end: 0, at: data.pick }
+  }
   // The symbol jumped to from the outline, while its first line shows.
   const chosen = await read($, symbol)
   if (chosen !== null && chosen.path === shown.path && chosen.start >= layout.visible.start && chosen.start <= layout.visible.end) {
@@ -852,8 +913,8 @@ const linesLabel = (start: number, end: number) =>
 
 // `@path (lines a-b)` into the prompt: the file attached, the lines named.
 async function referenceLines($: EngineInterface, shown: ExplorerPreview): Promise<string> {
-  const { start, end } = await pickedLines($, shown)
-  const label = linesLabel(start, end)
+  const { start, end, at } = await pickedLines($, shown)
+  const label = at ?? linesLabel(start, end)
   const { text, cursor } = await $.prompt.read()
   const before = text.slice(0, cursor)
   const lead = before === '' || /\s$/.test(before) ? '' : ' '
@@ -1337,15 +1398,27 @@ async function drawPreview(
   const isSource = shown.mode === 'file' || shown.mode === 'rendered'
   const fileLines = isSource && shown.text !== '' ? shown.text.replace(/\n$/, '').split('\n') : []
   const hunkRows = hunks.map(hunk => hunk.body.replace(/\n$/, '').split('\n').length)
-  const total = isSource ? fileLines.length : hunkRows.reduce((sum, n) => sum + n, 0)
+  // A data file: each table or tree row one terminal row, cut, never wrapped.
+  const parsed = shown.mode === 'data' && shown.text !== '' ? dataFor(shown) : undefined
+  const tree = parsed?.kind === 'tree' ? await read($, dataView) : undefined
+  const nodes = parsed?.kind === 'tree' && tree !== undefined
+    ? jsonRows(parsed.root, new Set(tree.path === shown.path ? tree.toggled : []), 2, MAX_DATA_ROWS)
+    : []
+  const pick = tree !== undefined && tree.path === shown.path ? tree.pick : ''
+  const dataTotal = parsed === undefined ? 0 : parsed.kind === 'table' ? parsed.lines.length : parsed.kind === 'tree' ? nodes.length : 1
+  const total = shown.mode === 'data' ? dataTotal : isSource ? fileLines.length : hunkRows.reduce((sum, n) => sum + n, 0)
   const isWrapped = await read($, wrapLines)
-  const shift = isWrapped ? 0 : await read($, sideways)
+  const isTable = parsed?.kind === 'table'
+  const shift = isWrapped && !isTable ? 0 : await read($, sideways)
   const isMd = isMarkdown(shown.path)
+  const isDataFile = isData(shown.path)
   const lineRoomEstimate = Math.max(10, width - String(Math.max(total, 1)).length * (shown.mode === 'diff' ? 2 : 1) - 6)
+  const tableWidest = parsed?.kind === 'table' ? widest(parsed.lines.map(one => one.text)) : 0
   const canShiftEstimate =
-    !isWrapped &&
-    (shown.mode === 'file' || shown.mode === 'diff') &&
-    widest(isSource ? fileLines : hunks.map(hunk => hunk.body).join('\n').split('\n')) > lineRoomEstimate
+    (isTable && tableWidest > width - 2) ||
+    (!isWrapped &&
+      (shown.mode === 'file' || shown.mode === 'diff') &&
+      widest(isSource ? fileLines : hunks.map(hunk => hunk.body).join('\n').split('\n')) > lineRoomEstimate)
 
   // The toolbar, each Button with the cells it draws in, packed into rows
   // that fit: a row that overflowed dropped its last Buttons, hotkeys and all.
@@ -1370,8 +1443,15 @@ async function drawPreview(
         onPress={() => showPath($, shown.path, { mode: 'rendered' })} />
     )))
   }
-  if (shown.isOnDisk && (isMd || shown.isChanged)) {
-    const label = isMd ? 'Source' : 'File'
+  if (shown.isOnDisk && isDataFile) {
+    const label = isDelimited(shown.path) ? 'Table' : 'Tree'
+    tools.push(tool('mode:data', label, 'm', () => (
+      <Button key="mode:data" label={label} plain hotkey="m" dimColor={shown.mode === 'data' ? undefined : true}
+        onPress={() => showPath($, shown.path, { mode: 'data' })} />
+    )))
+  }
+  if (shown.isOnDisk && (isMd || isDataFile || shown.isChanged)) {
+    const label = isMd || isDataFile ? 'Source' : 'File'
     tools.push(tool('mode:file', label, 'o', () => (
       <Button key="mode:file" label={label} plain hotkey="o" dimColor={shown.mode === 'file' ? undefined : true}
         onPress={() => showPath($, shown.path, { mode: 'file' })} />
@@ -1427,7 +1507,7 @@ async function drawPreview(
   const toolRows = packRows(tools, Math.max(8, width - 1))
   const hasStatus = shown.isChanged || total > 0 || shown.size !== undefined
   const nowMs = await clockNow($)
-  const fixed = 1 + toolRows.length + (hasStatus ? 1 : 0) + (shown.note !== '' ? 1 : 0)
+  const fixed = 1 + toolRows.length + (hasStatus ? 1 : 0) + (shown.note !== '' ? 1 : 0) + (pick !== '' ? 1 : 0)
   const room = rows === undefined ? total : Math.max(1, rows - fixed)
 
   // The rows each unit takes: a line wrapped into the room beside its gutter
@@ -1455,10 +1535,11 @@ async function drawPreview(
   const scroll = (by: number) =>
     update($, previewOffset, now => clamp(Math.min(now, layout.previewLast) + by, 0, layout.previewLast))
   const isOver = last > 0
-  const widestLine = !isWrapped && isCounted ? widest(isSource ? fileLines : hunks.map(hunk => hunk.body).join('\n').split('\n')) : 0
-  const sidewaysStep = Math.max(8, Math.floor(lineRoom / 2))
+  const widestLine = isTable ? tableWidest : !isWrapped && isCounted ? widest(isSource ? fileLines : hunks.map(hunk => hunk.body).join('\n').split('\n')) : 0
+  const slideRoom = isTable ? width - 1 : lineRoom
+  const sidewaysStep = Math.max(8, Math.floor(slideRoom / 2))
   const slide = (by: number) =>
-    update($, sideways, now => clamp(now + by * sidewaysStep, 0, Math.max(0, widestLine - lineRoom + 2)))
+    update($, sideways, now => clamp(now + by * sidewaysStep, 0, Math.max(0, widestLine - slideRoom + 2)))
   late.scroll = scroll
   late.slide = slide
   late.isOver = isOver
@@ -1540,6 +1621,52 @@ async function drawPreview(
       )
     })
   }
+  if (parsed?.kind === 'error') {
+    layout.visible = { start: parsed.line, end: parsed.line }
+    body.push(<Text color="red">{parsed.text}</Text>)
+    body.push(<Text dimColor>Press o for the source.</Text>)
+  }
+  if (parsed?.kind === 'table') {
+    const part = parsed.lines.slice(offset, offset + count)
+    layout.visible = { start: part[0]?.line ?? 0, end: part[part.length - 1]?.line ?? 0 }
+    part.forEach((one, i) => {
+      const text = fitCells(shiftCells(one.text, shift), Math.max(4, width - 1)).trimEnd()
+      body.push(
+        one.isRule ? (
+          <Text key={`row:${offset + i}`} dimColor>{text}</Text>
+        ) : (
+          <Text key={`row:${offset + i}`} bold={one.isHeader}>{text === '' ? ' ' : text}</Text>
+        ),
+      )
+    })
+    if (parsed.isCut && offset + count >= total) body.push(<Text dimColor>(first {MAX_DATA_RECORDS} records)</Text>)
+  }
+  if (parsed?.kind === 'tree') {
+    const part = nodes.slice(offset, offset + count)
+    layout.visible = { start: part[0]?.line ?? 0, end: part[part.length - 1]?.line ?? 0 }
+    if (nodes.length === 0) body.push(<Text dimColor>(empty)</Text>)
+    for (const row of part) {
+      const indent = '  '.repeat(Math.min(row.depth, 12))
+      const chevron = row.isOpen === undefined ? '  ' : row.isOpen ? '▾ ' : '▸ '
+      const label = row.key === '' ? '(value)' : row.key
+      const keyRoom = Math.max(4, Math.floor((width - indent.length - 4) / 2))
+      const keyText = fitCells(label, Math.min(keyRoom, cellWidth(label))).trimEnd()
+      const valueRoom = Math.max(4, width - 3 - indent.length - chevron.length - cellWidth(keyText) - 2)
+      body.push(
+        <Box key={`node:${row.path}`} flexDirection="row">
+          <Text color="blue">{row.path === pick ? '▌' : ' '}</Text>
+          <Text dimColor>{indent}</Text>
+          <Text color="blue">{chevron}</Text>
+          <Button key={`json:${row.path}`} label={keyText} plain onPress={() => pickNode($, shown.path, row)} />
+          <Text dimColor>: </Text>
+          <Text color={JSON_COLOR[row.kind]} dimColor={row.kind === 'null' || row.isOpen !== undefined || row.text.startsWith('{') || row.text.startsWith('[') ? true : undefined}>
+            {fitCells(row.text, valueRoom).trimEnd()}
+          </Text>
+        </Box>,
+      )
+    }
+    if (nodes.length >= MAX_DATA_ROWS && offset + count >= total) body.push(<Text dimColor>(first {MAX_DATA_ROWS} rows; fold some to see more)</Text>)
+  }
   if (shown.mode === 'file' && fileLines.length > 0) {
     body.push(
       <Code
@@ -1611,7 +1738,7 @@ async function drawPreview(
           {fit(
             [
               change !== undefined ? ` ${verb} ${against.label} · ${at + 1}/${list.length}` : '',
-              total > 0 ? `${change !== undefined ? ' ·' : ''} ${shown.mode === 'diff' ? 'rows' : 'lines'} ${offset + 1}-${shownEnd}/${total}` : '',
+              total > 0 ? `${change !== undefined ? ' ·' : ''} ${shown.mode === 'diff' || shown.mode === 'data' ? 'rows' : 'lines'} ${offset + 1}-${shownEnd}/${total}` : '',
               shown.size !== undefined ? ` · ${formatSize(shown.size)}${shown.mtimeMs ? ` · ${formatAge(shown.mtimeMs, nowMs)} ago` : ''}` : '',
             ].join(''),
             Math.max(4, width - 3),
@@ -1619,6 +1746,7 @@ async function drawPreview(
         </Text>
       )}
       {shown.note !== '' && <Text dimColor>{shown.note}</Text>}
+      {pick !== '' && <Text color="blue">{fit(`at ${pick}`, Math.max(4, width - 3))}</Text>}
       {body}
     </Box>
   )
