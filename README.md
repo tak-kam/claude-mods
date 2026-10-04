@@ -54,6 +54,10 @@ claude --plugin-dir ./file-explorer
 
 Opened at start, the pane docks beside the transcript in fullscreen mode at 144 columns or wider; `/files` opens it at any width.
 
+### Tests
+
+`claude plugin test file-explorer` runs the suite (no account needed): unit tests for the pure helpers in `hooks/` and integration tests that drive the explorer through the engine's test kit on every surface. CI runs it on every push and pull request against the pinned Claude Code version, and against the latest one as an early warning.
+
 ### Safety
 
 The explorer reads repositories you may not trust, so:
