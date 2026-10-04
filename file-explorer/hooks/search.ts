@@ -2,8 +2,8 @@ import type { ExplorerHit } from '../types'
 
 // Fuzzy file-name match, as a quick-open does: every query character in
 // order, scored up for runs, word starts and hits in the base name.
-export function fuzzyScore(path: string, query: string): number | undefined {
-  const text = path.toLowerCase()
+export function fuzzyScore(path: string, query: string, lower?: string): number | undefined {
+  const text = lower ?? path.toLowerCase()
   const wanted = query.toLowerCase().replace(/\s+/g, '')
   if (wanted === '') return 0
   const nameStart = text.lastIndexOf('/') + 1
@@ -25,14 +25,30 @@ export function fuzzyScore(path: string, query: string): number | undefined {
   return score - path.length / 100
 }
 
-export function fuzzyFilter(paths: readonly string[], query: string, limit: number): string[] {
-  const scored: { path: string; score: number }[] = []
-  for (const path of paths) {
-    const score = fuzzyScore(path, query)
-    if (score !== undefined) scored.push({ path, score })
+// The best `limit` paths for a query. `lower` is the paths lowercased once
+// (fuzzyIndex), so a keystroke pays for no conversions; only the kept few
+// are sorted, not every match.
+export function fuzzyFilter(paths: readonly string[], query: string, limit: number, lower?: readonly string[]): string[] {
+  const wanted = query.toLowerCase().replace(/\s+/g, '')
+  const kept: { path: string; score: number }[] = []
+  let floor = -Infinity
+  for (let i = 0; i < paths.length; i++) {
+    const path = paths[i] ?? ''
+    const score = fuzzyScore(path, wanted, lower?.[i])
+    if (score === undefined || (kept.length >= limit && score <= floor)) continue
+    kept.push({ path, score })
+    if (kept.length > limit * 2) {
+      kept.sort((a, b) => b.score - a.score)
+      kept.length = limit
+      floor = kept[limit - 1]?.score ?? -Infinity
+    }
   }
-  scored.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path))
-  return scored.slice(0, limit).map(one => one.path)
+  kept.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path))
+  return kept.slice(0, limit).map(one => one.path)
+}
+
+export function fuzzyIndex(paths: readonly string[]): string[] {
+  return paths.map(path => path.toLowerCase())
 }
 
 // `rg --null --line-number --column`: path NUL line:column:text, one a line.
@@ -52,22 +68,23 @@ export function parseGrep(raw: string, limit: number): ExplorerHit[] {
   return hits
 }
 
-// Where the query lands in a line, for highlighting: JavaScript's regex
-// stands in for ripgrep's, close enough to mark the hit.
-export function matchSpan(
-  text: string,
-  query: string,
-  options: { isRegex: boolean; isCaseSensitive: boolean },
-): { start: number; end: number } | undefined {
+// The query as a pattern for highlighting, compiled once per drawing:
+// JavaScript's regex stands in for ripgrep's, close enough to mark the hit.
+export function compileQuery(query: string, options: { isRegex: boolean; isCaseSensitive: boolean }): RegExp | undefined {
   if (query === '') return undefined
   try {
     const source = options.isRegex ? query : query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    const found = new RegExp(source, options.isCaseSensitive ? '' : 'i').exec(text)
-    if (found === null || found[0] === '') return undefined
-    return { start: found.index, end: found.index + found[0].length }
+    return new RegExp(source, options.isCaseSensitive ? '' : 'i')
   } catch {
     return undefined
   }
+}
+
+// Where the pattern lands in a line.
+export function matchSpan(text: string, pattern: RegExp | undefined): { start: number; end: number } | undefined {
+  const found = pattern?.exec(text)
+  if (found === null || found === undefined || found[0] === '') return undefined
+  return { start: found.index, end: found.index + found[0].length }
 }
 
 // A line cut to `room` cells around its hit, so the hit stays in view.

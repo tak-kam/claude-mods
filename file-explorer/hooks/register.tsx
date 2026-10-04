@@ -13,7 +13,7 @@ import type {
   ExplorerView,
 } from '../types'
 import { iconFor, iconWidth } from './icons'
-import { excerpt, fuzzyFilter, matchSpan, parseGrep } from './search'
+import { compileQuery, excerpt, fuzzyFilter, fuzzyIndex, matchSpan, parseGrep } from './search'
 import { cellWidth, fitCells, splitMarkdown } from './markdown'
 import type { IconStyle } from './icons'
 
@@ -63,7 +63,7 @@ const lastPrompt = atom({ plugin: 'file-explorer', key: 'lastPrompt' } as const,
 const previewOffset = atom({ plugin: 'file-explorer', key: 'previewOffset' } as const, 0)
 
 // The project's file list for name search, read once and dropped on refresh.
-const cache: { files?: string[]; turnHead?: string } = {}
+const cache: { files?: string[]; lower?: string[]; turnHead?: string } = {}
 
 // What the explorer was last drawn as, so presses know where a file shows.
 const layout = { isSplit: false, sidebarColumns: 0, listRows: 20, previewRows: 20, listTotal: 0, previewTotal: 0, icons: 'emoji' as IconStyle, visible: { start: 0, end: 0 } }
@@ -110,15 +110,22 @@ async function git($: EngineInterface, args: string[]) {
 // ---- files ---------------------------------------------------------------
 
 async function loadDir($: EngineInterface, rel: string): Promise<boolean> {
+  const entries = await listDir($, rel)
+  await update($, listings, all => {
+    if (entries !== undefined) return { ...all, [rel]: entries }
+    const { [rel]: _gone, ...rest } = all
+    return rest
+  })
+  return entries !== undefined
+}
+
+// A folder's entries, sorted, without storing them: refreshAll lists every
+// open folder at once and stores the lot in one write, so the pane redraws
+// once rather than once per folder.
+async function listDir($: EngineInterface, rel: string): Promise<ExplorerEntry[] | undefined> {
   const dir = await read($, root)
   const listed = await $.fs.list(join(dir, rel)).catch(() => undefined)
-  if (listed === undefined) {
-    await update($, listings, all => {
-      const { [rel]: _gone, ...rest } = all
-      return rest
-    })
-    return false
-  }
+  if (listed === undefined) return undefined
   const entries: ExplorerEntry[] = []
   for (const one of listed) {
     if (HIDDEN.has(one.name)) continue
@@ -129,8 +136,7 @@ async function loadDir($: EngineInterface, rel: string): Promise<boolean> {
     }
     entries.push({ name: one.name, isDir, size: one.size })
   }
-  await update($, listings, all => ({ ...all, [rel]: sortEntries(entries) }))
-  return true
+  return sortEntries(entries)
 }
 
 async function toggleDir($: EngineInterface, rel: string) {
@@ -408,11 +414,12 @@ async function fileIndex($: EngineInterface): Promise<string[]> {
       ? listed.stdout
       : (await git($, ['ls-files', '-z', '--cached', '--others', '--exclude-standard'])).stdout
   cache.files = raw.split('\0').filter(path => path !== '').slice(0, MAX_INDEX)
+  cache.lower = fuzzyIndex(cache.files)
   return cache.files
 }
 
 async function searchFiles($: EngineInterface, query: string) {
-  const files = query.trim() === '' ? [] : fuzzyFilter(await fileIndex($), query, MAX_FILE_RESULTS)
+  const files = query.trim() === '' ? [] : fuzzyFilter(await fileIndex($), query, MAX_FILE_RESULTS, cache.lower)
   const note = query.trim() === '' ? '' : files.length === 0 ? 'No files match.' : `${files.length}${files.length >= MAX_FILE_RESULTS ? '+' : ''} files`
   await update($, search, now => ({ ...now, mode: 'files' as const, query, files, note }))
   await update($, listOffset, () => 0)
@@ -610,13 +617,18 @@ function sliceHunk(body: string, skip: number, take: number): string {
 
 async function refreshAll($: EngineInterface) {
   const open = await read($, expanded)
-  const kept: string[] = []
-  await loadDir($, '')
-  for (const rel of open) {
-    if (await loadDir($, rel)) kept.push(rel)
-  }
-  await update($, expanded, () => kept)
+  const folders = ['', ...open]
+  const listed = await Promise.all(folders.map(rel => listDir($, rel)))
+  const next: Record<string, ExplorerEntry[]> = {}
+  folders.forEach((rel, i) => {
+    const entries = listed[i]
+    if (entries !== undefined) next[rel] = entries
+  })
+  await update($, listings, () => next)
+  const kept = open.filter(rel => next[rel] !== undefined)
+  if (kept.length !== open.length) await update($, expanded, () => kept)
   cache.files = undefined
+  cache.lower = undefined
   await loadChanges($)
   await loadHistory($)
   await reloadPreview($)
@@ -926,7 +938,7 @@ async function drawSidebar(
   const chosen = await read($, selected)
   const against = await read($, base)
 
-  let lines: { key: string; node: RenderElement }[] = []
+  let lines: { key: string; node: () => RenderElement }[] = []
   let fixed = 2
   const extra: RenderElement[] = []
 
@@ -942,7 +954,7 @@ async function drawSidebar(
         const rest = room - label.length - 1
         return {
           key: path,
-          node: (
+          node: () => (
             <Box key={`line:${path}`} flexDirection="row">
               <Text color="blue">{path === chosen ? '▌' : ' '}</Text>
               {icon.glyph !== '' && <Text color={icon.color}>{icon.glyph}</Text>}
@@ -954,6 +966,7 @@ async function drawSidebar(
       })
     } else {
       let lastPath = ''
+      const pattern = compileQuery(found.query, found)
       const counts = new Map<string, number>()
       for (const hit of found.hits) counts.set(hit.path, (counts.get(hit.path) ?? 0) + 1)
       for (const hit of found.hits) {
@@ -964,7 +977,7 @@ async function drawSidebar(
           const room = width - 1 - iconWidth(icon, layout.icons) - count.length
           lines.push({
             key: `file:${hit.path}`,
-            node: (
+            node: () => (
               <Box key={`hits:${hit.path}`} flexDirection="row">
                 <Text color="blue">{hit.path === chosen ? '▌' : ' '}</Text>
                 {icon.glyph !== '' && <Text color={icon.color}>{icon.glyph}</Text>}
@@ -977,11 +990,11 @@ async function drawSidebar(
         }
         const number = String(hit.line)
         const room = width - 4 - number.length
-        const span = matchSpan(hit.text, found.query, found)
-        const piece = excerpt(hit.text, span, room)
         lines.push({
           key: `${hit.path}:${hit.line}:${hit.column}`,
-          node: (
+          node: () => {
+            const piece = excerpt(hit.text, matchSpan(hit.text, pattern), room)
+            return (
             <Box key={`hitline:${hit.path}:${hit.line}:${hit.column}`} flexDirection="row">
               <Text>{'   '}</Text>
               <Button key={`hit:${hit.path}:${hit.line}:${hit.column}`} label={number} plain dimColor onPress={() => openHit($, hit)} />
@@ -989,7 +1002,8 @@ async function drawSidebar(
               <Text color="black" backgroundColor="yellow">{piece.hit}</Text>
               <Text>{piece.after}</Text>
             </Box>
-          ),
+            )
+          },
         })
       }
     }
@@ -1002,7 +1016,7 @@ async function drawSidebar(
       const rest = room - subject.length - 1
       return {
         key: commit.sha,
-        node: (
+        node: () => (
           <Box key={`line:${commit.sha}`} flexDirection="row">
             <Text color="blue">{against.head === commit.sha ? '▌' : ' '}</Text>
             <Text color="yellow">{commit.short} </Text>
@@ -1026,7 +1040,7 @@ async function drawSidebar(
       const rest = room - label.length - 1
       return {
         key: change.path,
-        node: (
+        node: () => (
           <Box key={`line:${change.path}`} flexDirection="row">
             <Text color="blue">{change.path === chosen ? '▌' : ' '}</Text>
             {icon.glyph !== '' && <Text color={icon.color}>{icon.glyph}</Text>}
@@ -1067,7 +1081,7 @@ async function drawSidebar(
       const room = width - 3 - used
       return {
         key: rel,
-        node: (
+        node: () => (
           <Box key={`line:${rel}`} flexDirection="row">
             <Text color="blue">{rel === chosen ? '▌' : ' '}</Text>
             <Text dimColor>{indent}</Text>
@@ -1164,7 +1178,7 @@ async function drawSidebar(
       )}
       {current === 'search' && (await drawSearchControls($, els, Input, width))}
       {extra}
-      {lines.slice(offset, offset + room).map(line => line.node)}
+      {lines.slice(offset, offset + room).map(line => line.node())}
     </Box>
   )
 }
@@ -1452,8 +1466,10 @@ export const register: Register = (on, options) => {
   })
 
   // Each prompt snapshots the working tree, for the last-prompt base.
+  // Deferred to a timer so sending the prompt never waits on git; the
+  // snapshot lands well before the model's first edit.
   on('prompt.submit', async ($, e, next) => {
-    await snapshotPrompt($).catch(() => undefined)
+    $.clock.after(0, () => void snapshotPrompt($).catch(() => undefined))
     return next(e)
   })
 
@@ -1462,7 +1478,9 @@ export const register: Register = (on, options) => {
     const tool = String(e.tool)
     const isError = (ran as { isError?: unknown }).isError === true
     if (!isError && (tool === 'Read' || EDITING_TOOLS.has(tool))) {
-      await followTool($, tool, e as unknown as Record<string, unknown>).catch(() => undefined)
+      // After the result is handed back, so following never slows Claude down.
+      const args = { ...(e as unknown as Record<string, unknown>) }
+      $.clock.after(0, () => void followTool($, tool, args).catch(() => undefined))
     }
     if (!EDITING_TOOLS.has(tool) && tool !== 'Bash') return ran
 
