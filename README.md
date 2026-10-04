@@ -78,14 +78,32 @@ The explorer needs nothing beyond Claude Code. Each tool below, when it is on yo
 | SVG in the terminal | `rsvg-convert` (librsvg) | the source (the desktop and VS Code apps draw SVG themselves) |
 | Mermaid diagrams | `mmdc` ([mermaid-cli](https://github.com/mermaid-js/mermaid-cli); brings Node.js packages and a headless Chromium) | the block as code |
 
-On macOS, everything is one step away:
+**macOS** (`sips` is already there for JPEG, GIF and WebP):
 
 ```sh
 brew install ripgrep librsvg
 npm i -g @mermaid-js/mermaid-cli
 ```
 
-On Debian or Ubuntu: `sudo apt install ripgrep ffmpeg librsvg2-bin`, plus mermaid-cli from npm. The `pictures` and `mermaid` options in `/config` set to `off` never run a converter or `mmdc`, installed or not.
+**Linux**, by distribution (`ffmpeg` for JPEG, GIF and WebP; `rsvg-convert` for SVG):
+
+```sh
+# Debian, Ubuntu
+sudo apt install ripgrep ffmpeg librsvg2-bin
+# Fedora (ffmpeg-free from Fedora itself, or ffmpeg from RPM Fusion)
+sudo dnf install ripgrep ffmpeg-free librsvg2-tools
+# Arch
+sudo pacman -S ripgrep ffmpeg librsvg
+# openSUSE
+sudo zypper install ripgrep ffmpeg rsvg-convert
+
+# Mermaid, on any of them (needs Node.js)
+npm i -g @mermaid-js/mermaid-cli
+```
+
+On Linux, the Chromium that mermaid-cli downloads needs the usual desktop libraries (NSS, ATK, GBM and so on); a desktop install has them, a minimal server or container may not, and then `mmdc` fails and the diagram stays code with its error shown. kitty and Ghostty both run on Linux; in other terminals pictures show as their alt text.
+
+The `pictures` and `mermaid` options in `/config` set to `off` never run a converter or `mmdc`, installed or not.
 
 ### Tests
 
