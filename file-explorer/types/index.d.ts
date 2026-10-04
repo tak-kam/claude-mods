@@ -39,8 +39,9 @@ export type ExplorerCommit = {
   when: string
 }
 
-// `rendered` draws a markdown file as markdown.
-export type ExplorerMode = 'file' | 'diff' | 'rendered'
+// `rendered` draws a markdown file as markdown; `data` a CSV/TSV file as a
+// table and a JSON file as a tree.
+export type ExplorerMode = 'file' | 'diff' | 'rendered' | 'data'
 
 export type ExplorerPreview = {
   path: string
@@ -78,6 +79,9 @@ declare module 'claude-code' {
       pins: string[]
       // The outline entry last jumped to: `r` names its lines while it is in view.
       symbol: { path: string; start: number; end: number } | null
+      // The JSON tree of `path`: the containers folded or unfolded against
+      // the default, and the node last picked (`a.b[3].c`), which `r` names.
+      dataView: { path: string; toggled: string[]; pick: string }
       ignored: string[]
       hideIgnored: boolean
       previewOffset: number

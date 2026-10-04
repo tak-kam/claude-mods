@@ -27,11 +27,11 @@ In **Changes**, press the base (\`vs HEAD\`) to cycle HEAD, the last prompt and 
 | --- | --- |
 | \`j\` \`k\` | Scroll down, up (the wheel too) |
 | \`n\` \`p\` | Next, previous changed file |
-| \`o\` \`d\` \`m\` | Source, diff, markdown preview |
+| \`o\` \`d\` \`m\` | Source, diff, and the readable view: markdown preview, CSV/TSV table, JSON tree |
 | \`w\` | Wrap long lines, or cut them at the edge |
 | \`◀\` \`▶\` | Scroll sideways, with wrapping off (click) |
 | \`q\` | Quote the mouse selection into the prompt |
-| \`r\` | Insert \`@file (lines a-b)\`: the selection, else the outline symbol jumped to, else the lines in view |
+| \`r\` | Insert \`@file (lines a-b)\`: the selection, else the outline symbol jumped to or the JSON node picked, else the lines in view |
 | \`y\` | Copy the file's path |
 | \`b\` | Pin or unpin the file (pins list at the top of Files, kept per project) |
 | \`❝ quote\` | Quote one diff hunk (click) |
@@ -43,6 +43,10 @@ In **Changes**, press the base (\`vs HEAD\`) to cycle HEAD, the last prompt and 
 ## Outline
 
 The open file's functions, classes and types (TypeScript, JavaScript, Python, Go, Rust) or its markdown headings. Press one to scroll the preview to it; \`r\` then names that symbol's lines.
+
+## Data files
+
+CSV and TSV open as a table (\`◀\` \`▶\` scroll wide ones sideways); JSON and JSON Lines as a tree. Press a key in the tree to fold or unfold it and pick it: its path (\`a.b[3].c\`) shows above the tree, and \`r\` inserts \`@file (a.b[3].c)\`. Invalid JSON says where it breaks.
 
 ## Commands
 
@@ -84,11 +88,11 @@ export const HELP_JA = `# キーとコマンド
 | --- | --- |
 | \`j\` \`k\` | 下・上にスクロール（ホイールでも可） |
 | \`n\` \`p\` | 次・前の変更ファイル |
-| \`o\` \`d\` \`m\` | ソース、diff、Markdown プレビュー |
+| \`o\` \`d\` \`m\` | ソース、diff、読みやすい表示（Markdown プレビュー、CSV/TSV の表、JSON のツリー） |
 | \`w\` | 長い行を折り返す・画面端で切る |
 | \`◀\` \`▶\` | 横スクロール（折り返しオフのとき、クリック） |
 | \`q\` | マウスで選択した範囲をプロンプトに引用 |
-| \`r\` | \`@file (lines a-b)\` を入れる（選択範囲、なければアウトラインで飛んだシンボル、なければ表示中の行） |
+| \`r\` | \`@file (lines a-b)\` を入れる（選択範囲、なければアウトラインで飛んだシンボルか選んだ JSON の要素、なければ表示中の行） |
 | \`y\` | ファイルのパスをコピー |
 | \`b\` | ファイルをピン留め・解除（Files の一番上に並び、プロジェクトごとに保存） |
 | \`❝ quote\` | diff のまとまりを 1 つ引用（クリック） |
@@ -100,6 +104,10 @@ export const HELP_JA = `# キーとコマンド
 ## アウトライン
 
 開いているファイルの関数・クラス・型（TypeScript、JavaScript、Python、Go、Rust）や Markdown の見出しの一覧です。押すとプレビューがそこまでスクロールし、続けて \`r\` を押すとそのシンボルの行範囲を入れます。
+
+## データファイル
+
+CSV と TSV は表で開きます（幅が広いときは \`◀\` \`▶\` で横スクロール）。JSON と JSON Lines はツリーで開きます。ツリーのキーを押すと折りたたみ・展開してその要素を選び、パス（\`a.b[3].c\`）がツリーの上に出ます。続けて \`r\` で \`@file (a.b[3].c)\` を入れます。壊れた JSON はどこで壊れているかを表示します。
 
 ## コマンド
 

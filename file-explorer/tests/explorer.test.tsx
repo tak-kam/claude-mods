@@ -1141,3 +1141,66 @@ test('outlines the open file and jumps to a symbol, which r then names', async (
   await $.command.run({ command: 'files', args: 'outline' } as never)
   expect(await ui.find({ key: 'sym:2' })).toBeDefined()
 })
+
+test('opens CSV as a table and JSON as a tree, with the source a key away', async ($, on) => {
+  const wide = 'x'.repeat(39)
+  const wider = 'y'.repeat(39)
+  const csv = ['id,name,note,more', `1,"Smith, J",${wide},${wider}`, `2,Ann,"two\nlines"`, `3,Bo,${wide}`].join('\n') + '\n'
+  const json = '{\n  "name": "app",\n  "deps": {\n    "a": "^1",\n    "b": "^2"\n  },\n  "list": [1, 2]\n}\n'
+  const files: Record<string, string> = { 'data.csv': csv, 'pkg.json': json, 'bad.json': '{\n  "a": 1,\n  "b" 2\n}\n' }
+  const tree = Object.keys(files).map(name => ({ name, kind: 'file' as const, size: 10, mtimeMs: 0, isLink: false }))
+  let filled = ''
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('fs.stat', async (_$, e) => STAT(e.path))
+  on('fs.list', async (_$, e) => ({ value: e.path === ROOT ? tree : [] }))
+  on('fs.read', async (_$, e) => ({ value: files[e.path.slice(ROOT.length + 1)] ?? '' }))
+  on('process.run', async (_$, e) => fakeGit(e.argv, []))
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+  on('ui.panes', async () => ({ value: [] }))
+  on('ui.selection', async () => ({ value: undefined }))
+  on('prompt.read', async () => ({ value: { text: '', cursor: 0 } }))
+  on('prompt.fill', async (_$, e) => {
+    filled = e.text
+    return { isFilled: true as const, text: e.text }
+  })
+
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE('file-explorer', 100))
+
+  // CSV: a header, a rule, aligned rows; a quoted newline stays in its cell.
+  await ui.press({ key: 'row:data.csv' })
+  expect((await ui.find({ key: 'mode:data' }))?.props.label).toBe('Table')
+  expect(await ui.find({ type: 'Text', text: /^id │ name\s+│ note\s+│/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^1\s+│ Smith, J │ x+/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^2\s+│ Ann\s+│ two\?lines\s/ })).toBeDefined()
+  expect(await ui.find({ type: 'Code' })).toBeUndefined()
+  // Wide tables scroll sideways.
+  await ui.press({ key: 'right' })
+  expect(await ui.find({ type: 'Text', text: /^id │/ })).toBeUndefined()
+  await ui.press({ key: 'left' })
+  // r with nothing picked names the records in view by their lines.
+  await ui.press({ key: 'ref' })
+  expect(filled).toBe('@data.csv (lines 1-5) ')
+  // Source is a key away.
+  await ui.press({ key: 'mode:file' })
+  expect(String((await ui.find({ type: 'Code' }))?.props.source)).toContain('id,name,note,more')
+
+  // JSON: a tree two levels open; a key folds, unfolds and picks.
+  await ui.press({ key: 'row:pkg.json' })
+  expect((await ui.find({ key: 'mode:data' }))?.props.label).toBe('Tree')
+  expect((await ui.find({ key: 'json:deps.b' }))?.props.label).toBe('b')
+  expect(await ui.find({ type: 'Text', text: '"^2"' })).toBeDefined()
+  await ui.press({ key: 'json:deps' })
+  expect(await ui.find({ key: 'json:deps.b' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: 'at deps' })).toBeDefined()
+  await ui.press({ key: 'json:deps' })
+  await ui.press({ key: 'json:list[1]' })
+  expect(await ui.find({ type: 'Text', text: 'at list[1]' })).toBeDefined()
+  await ui.press({ key: 'ref' })
+  expect(filled).toBe('@pkg.json (list[1]) ')
+
+  // Invalid JSON says where it breaks.
+  await ui.press({ key: 'row:bad.json' })
+  expect(await ui.find({ type: 'Text', text: "Not valid JSON: expected ':' at line 3, column 7." })).toBeDefined()
+})
