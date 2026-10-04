@@ -71,6 +71,8 @@ declare module 'claude-code' {
       lastPrompt: ExplorerBase | null
       search: ExplorerSearch
       previewOffset: number
+      wrapLines: boolean
+      sideways: number
     }
   }
 }

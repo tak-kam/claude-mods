@@ -17,6 +17,7 @@ import { compileQuery, excerpt, fuzzyFilter, fuzzyIndex, matchSpan, parseGrep } 
 import { cellWidth, fitCells, localLinks, markdownWindow, resolveLink, splitMarkdown } from './markdown'
 import { clipDiff, hunkOffset, parseLog, parseNameStatus, sliceHunk, splitHunks } from './diff'
 import { cleanText, isPlainRelative, oneLine } from './safe'
+import { fitCount, lastStart, rowsOf, shiftCells, widest } from './wrap'
 import type { IconStyle } from './icons'
 
 const EXPLORER = 'file-explorer'
@@ -62,13 +63,15 @@ const search = atom({ plugin: 'file-explorer', key: 'search' } as const, NO_SEAR
 const listOffset = atom({ plugin: 'file-explorer', key: 'listOffset' } as const, 0)
 const follow = atom({ plugin: 'file-explorer', key: 'follow' } as const, true)
 const lastPrompt = atom({ plugin: 'file-explorer', key: 'lastPrompt' } as const, null)
+const wrapLines = atom({ plugin: 'file-explorer', key: 'wrapLines' } as const, true)
+const sideways = atom({ plugin: 'file-explorer', key: 'sideways' } as const, 0)
 const previewOffset = atom({ plugin: 'file-explorer', key: 'previewOffset' } as const, 0)
 
 // The project's file list for name search, read once and dropped on refresh.
 const cache: { files?: string[]; lower?: string[]; turnHead?: string; rootReal?: string } = {}
 
 // What the explorer was last drawn as, so presses know where a file shows.
-const layout = { isSplit: false, sidebarColumns: 0, listRows: 20, previewRows: 20, listTotal: 0, previewTotal: 0, icons: 'emoji' as IconStyle, visible: { start: 0, end: 0 } }
+const layout = { isSplit: false, sidebarColumns: 0, listRows: 20, previewRows: 20, listTotal: 0, previewTotal: 0, previewLast: 0, icons: 'emoji' as IconStyle, visible: { start: 0, end: 0 } }
 
 // VS Code's decoration colours, by the letter drawn at the row's end.
 const BADGE_COLOR: Record<string, string> = {
@@ -485,7 +488,10 @@ async function showPath($: EngineInterface, rel: string, options: { mode?: Explo
     isOnDisk: file.isOnDisk,
   }
   const before = await read($, preview)
-  if (before === null || before.path !== rel || before.mode !== mode) await update($, previewOffset, () => 0)
+  if (before === null || before.path !== rel || before.mode !== mode) {
+    await update($, previewOffset, () => 0)
+    await update($, sideways, () => 0)
+  }
   await update($, preview, () => shown)
   await reveal($, rel)
   if (!layout.isSplit) await $.ui.open({ id: PREVIEW, title: baseName(rel) })
@@ -1073,18 +1079,42 @@ async function drawPreview(
   const hasModes = shown.isChanged || isMarkdown(shown.path)
   const fixed = 1 + (hasModes ? 1 : 0) + (shown.note !== '' ? 1 : 0)
   const room = rows === undefined ? total : Math.max(1, rows - fixed)
+  const isWrapped = await read($, wrapLines)
+  const shift = isWrapped ? 0 : await read($, sideways)
+
+  // The rows each unit takes: a line wrapped into the room beside its gutter
+  // (line numbers; a diff's two plus its marker), a hunk label one.
+  const digits = String(Math.max(total, 1)).length
+  const gutter = shown.mode === 'diff' ? digits * 2 + 5 : digits + 3
+  const lineRoom = Math.max(10, width - gutter - 1)
+  const costs: number[] = []
+  if (shown.mode === 'file') for (const line of fileLines) costs.push(isWrapped ? rowsOf(line, lineRoom) : 1)
+  if (shown.mode === 'diff') {
+    for (const hunk of hunks) {
+      costs.push(1)
+      for (const line of hunk.body.replace(/\n$/, '').split('\n').slice(1)) {
+        costs.push(isWrapped ? rowsOf(line.slice(1), lineRoom) : 1)
+      }
+    }
+  }
+  const isCounted = shown.mode === 'file' || shown.mode === 'diff'
+  const last = rows === undefined ? 0 : isCounted ? lastStart(costs, room) : Math.max(0, total - room)
   layout.previewRows = room
   layout.previewTotal = total
-  const offset = rows === undefined ? 0 : clamp(await read($, previewOffset), 0, Math.max(0, total - room))
+  layout.previewLast = last
+  const offset = rows === undefined ? 0 : clamp(await read($, previewOffset), 0, last)
+  const count = rows === undefined ? total : isCounted ? fitCount(costs, offset, room) : room
   const scroll = (by: number) =>
-    update($, previewOffset, now => {
-      const last = Math.max(0, total - layout.previewRows)
-      return clamp(Math.min(now, last) + by, 0, last)
-    })
-  const isOver = total > room
+    update($, previewOffset, now => clamp(Math.min(now, layout.previewLast) + by, 0, layout.previewLast))
+  const isOver = last > 0
+  const widestLine = !isWrapped && isCounted ? widest(isSource ? fileLines : hunks.map(hunk => hunk.body).join('\n').split('\n')) : 0
+  const canShift = !isWrapped && widestLine > lineRoom
+  const sidewaysStep = Math.max(8, Math.floor(lineRoom / 2))
+  const slide = (by: number) =>
+    update($, sideways, now => clamp(now + by, 0, Math.max(0, widestLine - lineRoom + 2)))
 
   const body: RenderElement[] = []
-  let shownEnd = Math.min(total, offset + room)
+  let shownEnd = Math.min(total, offset + count)
   layout.visible = shown.mode === 'file' ? { start: offset + 1, end: shownEnd } : { start: 0, end: 0 }
   if (shown.mode === 'rendered' && fileLines.length > 0) {
     const part = rows === undefined
@@ -1110,7 +1140,7 @@ async function drawPreview(
               <Code
                 source={`${piece.text}\n`}
                 language={piece.language === '' ? undefined : piece.language}
-                wrap="truncate-end"
+                wrap={isWrapped ? 'wrap' : 'truncate-end'}
               />
             )}
           </Box>,
@@ -1162,15 +1192,15 @@ async function drawPreview(
   if (shown.mode === 'file' && fileLines.length > 0) {
     body.push(
       <Code
-        source={`${fileLines.slice(offset, offset + room).join('\n')}\n`}
+        source={`${fileLines.slice(offset, offset + count).map(line => shiftCells(line, shift)).join('\n')}\n`}
         path={shown.path}
         startLine={offset + 1}
-        wrap="truncate-end"
+        wrap={isWrapped ? 'wrap' : 'truncate-end'}
       />,
     )
   }
   let skip = offset
-  let left = room
+  let left = count
   hunks.forEach((hunk, i) => {
     const size = hunkRows[i] ?? 1
     if (left <= 0 || skip >= size) {
@@ -1203,7 +1233,11 @@ async function drawPreview(
     const from = Math.max(0, skip - 1)
     const take = Math.min(left, size - 1 - from)
     if (take > 0) {
-      body.push(<Code source={sliceHunk(hunk.body, from, take)} format="diff" path={shown.path} wrap="truncate-end" />)
+      const part = sliceHunk(hunk.body, from, take)
+      const source = shift === 0
+        ? part
+        : part.split('\n').map((line, n) => (n === 0 || line === '' ? line : line.charAt(0) + shiftCells(line.slice(1), shift))).join('\n')
+      body.push(<Code source={source} format="diff" path={shown.path} wrap={isWrapped ? 'wrap' : 'truncate-end'} />)
       left -= take
     }
     skip = 0
@@ -1217,6 +1251,10 @@ async function drawPreview(
           {fit(shown.path, width - 19)}
         </Text>
         <Box flexDirection="row" gap={1}>
+          <Button key="wrap" label="↩" plain hotkey="w" dimColor={isWrapped ? undefined : true}
+            onPress={() => update($, wrapLines, now => !now)} />
+          {canShift && <Button key="left" label="◀" plain dimColor={shift === 0 ? true : undefined} onPress={() => slide(-sidewaysStep)} />}
+          {canShift && <Button key="right" label="▶" plain onPress={() => slide(sidewaysStep)} />}
           {isOver && <Button key="up" label="▲" plain hotkey="k" onPress={() => scroll(-Math.max(1, Math.floor(room / 2)))} />}
           {isOver && <Button key="down" label="▼" plain hotkey="j" onPress={() => scroll(Math.max(1, Math.floor(room / 2)))} />}
           {list.length > 0 && <Button key="prev" label="‹" plain hotkey="p" onPress={() => step(-1)} />}
@@ -1368,7 +1406,7 @@ export const register: Register = (on, options) => {
       const last = Math.max(0, layout.listTotal - layout.listRows)
       await update($, listOffset, now => clamp(Math.min(now, last) + by, 0, last))
     } else {
-      const last = Math.max(0, layout.previewTotal - layout.previewRows)
+      const last = layout.previewLast
       await update($, previewOffset, now => clamp(Math.min(now, last) + by, 0, last))
     }
     return {}
