@@ -16,6 +16,7 @@ Keys work while the explorer has the keyboard: click it, or press \`ctrl+x tab\`
 | \`⊟\` | Collapse every folder |
 | \`@\` | Insert \`@file\` for the selected file |
 | \`follow\` | Show what Claude reads and edits as it happens |
+| \`g\` | Hide what .gitignore leaves out, or show it dimmed |
 | \`i\` | Open or close this help |
 
 In **Changes**, press the base (\`vs HEAD\`) to cycle HEAD, the last prompt and the default branch, or type a ref or \`a..b\` in the field below it.
@@ -68,6 +69,7 @@ export const HELP_JA = `# キーとコマンド
 | \`⊟\` | フォルダをすべて閉じる |
 | \`@\` | 選択中のファイルの \`@file\` を入力欄に入れる |
 | \`follow\` | Claude が読んだり編集したりしたファイルを追いかけて表示 |
+| \`g\` | .gitignore で除外されたものを隠す・薄く表示する |
 | \`i\` | このヘルプを開く・閉じる |
 
 **Changes** では、比較の基準（\`vs HEAD\`）を押すと HEAD、直前の指示、既定ブランチの順に切り替わります。その下の欄に ref や \`a..b\` を入力することもできます。

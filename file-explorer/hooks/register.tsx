@@ -18,6 +18,7 @@ import { cellWidth, fitCells, localLinks, markdownWindow, resolveLink, splitMark
 import { clipDiff, hunkOffset, parseLog, parseNameStatus, sliceHunk, splitHunks } from './diff'
 import { cleanText, isPlainRelative, oneLine } from './safe'
 import { helpText } from './help'
+import { formatAge, formatSize, isIgnored, parseIgnored } from './details'
 import type { HelpLanguage } from './help'
 import { buttonCells, fitCount, lastStart, packRows, rowsOf, shiftCells, widest } from './wrap'
 import type { IconStyle } from './icons'
@@ -62,6 +63,8 @@ const NO_SEARCH: ExplorerSearch = {
   note: '',
 }
 const search = atom({ plugin: 'file-explorer', key: 'search' } as const, NO_SEARCH)
+const ignored = atom({ plugin: 'file-explorer', key: 'ignored' } as const, [])
+const hideIgnored = atom({ plugin: 'file-explorer', key: 'hideIgnored' } as const, false)
 const pins = atom({ plugin: 'file-explorer', key: 'pins' } as const, [])
 const listOffset = atom({ plugin: 'file-explorer', key: 'listOffset' } as const, 0)
 const follow = atom({ plugin: 'file-explorer', key: 'follow' } as const, true)
@@ -147,7 +150,7 @@ async function listDir($: EngineInterface, rel: string): Promise<ExplorerEntry[]
       const target = await $.fs.stat(join(dir, rel === '' ? one.name : `${rel}/${one.name}`)).catch(() => undefined)
       isDir = target?.kind === 'dir'
     }
-    entries.push({ name: one.name, isDir, size: one.size })
+    entries.push({ name: one.name, isDir, size: one.size, mtimeMs: one.mtimeMs })
   }
   return sortEntries(entries)
 }
@@ -462,16 +465,17 @@ async function fileText($: EngineInterface, rel: string, _size?: number) {
     return { text: '', note: `links outside the project: ${oneLine(real || 'unresolved')}`, isOnDisk: false }
   }
   const bytes = stat.size
+  const facts = { size: bytes, mtimeMs: stat.mtimeMs }
   if (bytes > MAX_PREVIEW_BYTES) {
-    return { text: '', note: `${Math.round(bytes / 1024)} KiB: too large to preview`, isOnDisk: true }
+    return { text: '', note: `${Math.round(bytes / 1024)} KiB: too large to preview`, isOnDisk: true, ...facts }
   }
   const text = await $.fs.read(join(dir, rel)).catch(() => undefined)
   if (text === undefined) return { text: '', note: 'could not be read', isOnDisk: false }
-  if (text.includes('\0')) return { text: '', note: 'binary file', isOnDisk: true }
+  if (text.includes('\0')) return { text: '', note: 'binary file', isOnDisk: true, ...facts }
   const clean = cleanText(text)
-  if (clean.length <= MAX_CODE_CHARS) return { text: clean, note: '', isOnDisk: true }
+  if (clean.length <= MAX_CODE_CHARS) return { text: clean, note: '', isOnDisk: true, ...facts }
   const cut = clean.lastIndexOf('\n', MAX_CODE_CHARS) + 1 || MAX_CODE_CHARS
-  return { text: clean.slice(0, cut), note: 'preview cut at 10000 characters', isOnDisk: true }
+  return { text: clean.slice(0, cut), note: 'preview cut at 10000 characters', isOnDisk: true, ...facts }
 }
 
 const isMarkdown = (rel: string) => /\.(md|mdx|markdown)$/i.test(rel)
@@ -502,6 +506,8 @@ async function showPath($: EngineInterface, rel: string, options: { mode?: Explo
     note: mode === 'diff' ? diff.note : file.note,
     isChanged: change !== undefined,
     isOnDisk: file.isOnDisk,
+    size: (file as { size?: number }).size,
+    mtimeMs: (file as { mtimeMs?: number }).mtimeMs,
   }
   const before = await read($, preview)
   if (before === null || before.path !== rel || before.mode !== mode) {
@@ -577,6 +583,17 @@ async function quoteSelection($: EngineInterface, path: string | undefined): Pro
 
 
 
+// ---- ignored files -------------------------------------------------------
+
+const MAX_IGNORED = 5000
+
+// What .gitignore leaves out, whole folders as one entry; empty outside git.
+async function loadIgnored($: EngineInterface) {
+  const listed = await git($, ['ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z'])
+  const found = listed.exitCode === 0 ? parseIgnored(listed.stdout, MAX_IGNORED) : []
+  await update($, ignored, () => found)
+}
+
 // ---- pins and copying ----------------------------------------------------
 
 // Pins are kept per project in the store, so they outlast the session.
@@ -646,6 +663,7 @@ async function refreshAll($: EngineInterface) {
   cache.files = undefined
   cache.lower = undefined
   await loadChanges($)
+  await loadIgnored($)
   await loadHistory($)
   await reloadPreview($)
 }
@@ -864,6 +882,15 @@ async function drawSearchControls(
   )
 }
 
+// Ages are a nicety: where no clock answers (a bare host), they are left out.
+async function clockNow($: EngineInterface): Promise<number> {
+  try {
+    return await $.clock.now()
+  } catch {
+    return 0
+  }
+}
+
 // The tree, the changes or the history; `rows` bounds the list to a window
 // of its own (split view), absent draws it whole for the pane to scroll.
 async function drawSidebar(
@@ -882,6 +909,7 @@ async function drawSidebar(
   const against = await read($, base)
 
   let lines: { key: string; node: () => RenderElement }[] = []
+  const isHidingIgnored = await read($, hideIgnored)
   // The tabs and the list's scroll Buttons, measured and packed into rows
   // that fit the sidebar: a Button pushed off the edge loses its hotkey.
   const isRoomy = width >= 44
@@ -903,6 +931,14 @@ async function drawSidebar(
     tab('changes', `${isRoomy ? 'Changes' : 'Chg'} ${list.length}`, 'c'),
     tab('history', isRoomy ? 'History' : 'Log', 'h'),
     tab('search', isRoomy ? 'Search' : 'Find', 's'),
+    {
+      key: 'ignored',
+      cells: buttonCells('⊘', true),
+      draw: () => (
+        <Button key="ignored" label="⊘" plain hotkey="g" dimColor={isHidingIgnored ? undefined : true}
+          onPress={() => update($, hideIgnored, now => !now)} />
+      ),
+    },
     {
       key: 'help',
       cells: buttonCells('?', true),
@@ -1057,8 +1093,13 @@ async function drawSidebar(
     const status: Record<string, string> = {}
     for (const change of list) status[change.path] = change.letter
     const folders = folderBadges(list)
-    const tree = flatten(all, open)
+    const ignoredSet = new Set(await read($, ignored))
+    const isHiding = await read($, hideIgnored)
+    const tree = flatten(all, open).filter(row => !isHiding || !isIgnored(row.rel, ignoredSet))
     if (tree.length === 0) extra.push(<Text dimColor>(empty)</Text>)
+    // Sizes and ages beside files, when the sidebar has room for them.
+    const now = await clockNow($)
+    const showDetails = width >= 36
     const pinned = await read($, pins)
     const pinLines = pinned.length === 0 ? [] : [
       { key: 'pins:header', node: () => <Text key="pins:header" dimColor>★ Pinned</Text> },
@@ -1092,7 +1133,9 @@ async function drawSidebar(
       const chevron = entry.isDir ? (isOpen ? '▾ ' : '▸ ') : layout.icons === 'ascii' ? '' : '  '
       const icon = iconFor(entry.name, entry.isDir, isOpen, layout.icons)
       const name = entry.isDir ? `${entry.name}/` : entry.name
-      const used = indent.length + chevron.length + iconWidth(icon, layout.icons) + badge.length + mark.length
+      const dim = isIgnored(rel, ignoredSet)
+      const detail = showDetails && !entry.isDir ? `${formatSize(entry.size)} ${formatAge(entry.mtimeMs ?? 0, now)}`.trimEnd() : ''
+      const used = indent.length + chevron.length + iconWidth(icon, layout.icons) + badge.length + mark.length + (detail === '' ? 0 : detail.length + 1)
       const room = width - 3 - used
       return {
         key: rel,
@@ -1111,9 +1154,11 @@ async function drawSidebar(
               key={`row:${rel}`}
               label={fit(name, room)}
               plain
+              dimColor={dim ? true : undefined}
               onPress={() => (entry.isDir ? toggleDir($, rel) : showPath($, rel, { mode: fileMode(rel), size: entry.size }))}
             />
             <Box flexGrow={1} />
+            {detail !== '' && <Text dimColor> {detail}</Text>}
             {mark !== '' && <Text color="blue">{mark}</Text>}
             {badge !== '' && <Text color={BADGE_COLOR[letter ?? ''] ?? 'yellow'}> {badge}</Text>}
           </Box>
@@ -1297,7 +1342,8 @@ async function drawPreview(
     )))
   }
   const toolRows = packRows(tools, Math.max(8, width - 1))
-  const hasStatus = shown.isChanged || total > 0
+  const hasStatus = shown.isChanged || total > 0 || shown.size !== undefined
+  const nowMs = await clockNow($)
   const fixed = 1 + toolRows.length + (hasStatus ? 1 : 0) + (shown.note !== '' ? 1 : 0)
   const room = rows === undefined ? total : Math.max(1, rows - fixed)
 
@@ -1483,6 +1529,7 @@ async function drawPreview(
             [
               change !== undefined ? ` ${verb} ${against.label} · ${at + 1}/${list.length}` : '',
               total > 0 ? `${change !== undefined ? ' ·' : ''} ${shown.mode === 'diff' ? 'rows' : 'lines'} ${offset + 1}-${shownEnd}/${total}` : '',
+              shown.size !== undefined ? ` · ${formatSize(shown.size)}${shown.mtimeMs ? ` · ${formatAge(shown.mtimeMs, nowMs)} ago` : ''}` : '',
             ].join(''),
             Math.max(4, width - 3),
           )}

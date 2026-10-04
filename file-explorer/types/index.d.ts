@@ -1,4 +1,4 @@
-export type ExplorerEntry = { name: string; isDir: boolean; size: number }
+export type ExplorerEntry = { name: string; isDir: boolean; size: number; mtimeMs?: number }
 
 export type ExplorerView = 'files' | 'changes' | 'history' | 'search'
 
@@ -52,6 +52,9 @@ export type ExplorerPreview = {
   isOnDisk: boolean
   // The keys and commands, not a file: never reloaded from disk.
   isHelp?: boolean
+  // The file's size and modification time, when it is on disk.
+  size?: number
+  mtimeMs?: number
 }
 
 declare module 'claude-code' {
@@ -73,6 +76,8 @@ declare module 'claude-code' {
       lastPrompt: ExplorerBase | null
       search: ExplorerSearch
       pins: string[]
+      ignored: string[]
+      hideIgnored: boolean
       previewOffset: number
       wrapLines: boolean
       sideways: number
