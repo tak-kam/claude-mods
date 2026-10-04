@@ -23,9 +23,9 @@ jobs:
         claude-code: ['2.1.289', 'latest']
     continue-on-error: ${{ matrix.claude-code == 'latest' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
 
