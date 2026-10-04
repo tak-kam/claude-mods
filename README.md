@@ -53,3 +53,13 @@ claude --plugin-dir ./file-explorer
 - Preview: `o` / `d` file or diff, `j` / `k` scroll, `n` / `p` next or previous change, `q` quotes the mouse selection, `❝ quote` quotes a hunk, `@` inserts `@path`
 
 Opened at start, the pane docks beside the transcript in fullscreen mode at 144 columns or wider; `/files` opens it at any width.
+
+### Safety
+
+The explorer reads repositories you may not trust, so:
+
+- Nothing from a repository reaches the terminal as written: control characters in file names, commit messages and search hits are shown as `?`, dropped from file contents, and bidi override characters (Trojan Source) are shown as `�`
+- Every git call runs with `core.fsmonitor=false`, diffs with `--no-ext-diff --no-textconv`, and the prompt snapshot is skipped when the repository's own config defines a clean filter other than git-lfs, so a planted `.git/config` cannot make the explorer run a program
+- Commands run by argument vector, never through a shell; refs starting with `-` are refused
+- A symlink that leads out of the project is named, not read; tool paths with `..` are not followed
+- File contents only reach Claude when you press `@`, `❝` or `#`

