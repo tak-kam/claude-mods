@@ -515,6 +515,7 @@ test('shows renames, binaries and large files for what they are', async ($, on) 
     value: (e.path === ROOT
       ? [
           { name: 'big.log', kind: 'file' as const, size: 2 * 1024 * 1024 },
+          { name: 'blob.bin', kind: 'file' as const, size: 300 },
           { name: 'logo.png', kind: 'file' as const, size: 300 },
           { name: 'new.ts', kind: 'file' as const, size: 20 },
         ]
@@ -524,7 +525,7 @@ test('shows renames, binaries and large files for what they are', async ($, on) 
   on('fs.stat', async (_$, e) => ({
     value: { kind: 'file' as const, size: e.path.endsWith('big.log') ? 2 * 1024 * 1024 : 20, mtimeMs: 0, isLink: false, realPath: e.path },
   }))
-  on('fs.read', async (_$, e) => ({ value: e.path.endsWith('.png') ? '\u0089PNG\u0000\u0000' : 'export {}\n' }))
+  on('fs.read', async (_$, e) => ({ value: /\.(png|bin)$/.test(e.path) ? '\u0089PNG\u0000\u0000' : 'export {}\n' }))
   on('process.run', async (_$, e) => {
     const line = gitArgs(e.argv).join(' ')
     if (line.startsWith('diff --relative --name-status')) return ok('R092\0old.ts\0new.ts\0M\0logo.png\0')
@@ -546,11 +547,15 @@ test('shows renames, binaries and large files for what they are', async ($, on) 
 
   await ui.press({ key: 'change:logo.png' })
   expect(await ui.find({ type: 'Text', text: 'binary file changed' })).toBeDefined()
+  // A changed picture's File view draws the picture.
   await ui.press({ key: 'mode:file' })
-  expect(await ui.find({ type: 'Text', text: 'binary file' })).toBeDefined()
+  expect(await ui.find({ type: 'Image' })).toBeDefined()
   expect(await ui.find({ type: 'Code' })).toBeUndefined()
 
   await ui.press({ key: 'tab:files' })
+  await ui.press({ key: 'row:blob.bin' })
+  expect(await ui.find({ type: 'Text', text: 'binary file' })).toBeDefined()
+  expect(await ui.find({ type: 'Code' })).toBeUndefined()
   await ui.press({ key: 'row:big.log' })
   expect(await ui.find({ type: 'Text', text: '2048 KiB: too large to preview' })).toBeDefined()
 })
@@ -1286,4 +1291,88 @@ test("shows a file's own history and its blame, each commit a press away", async
   await ui.press({ key: 'history:all' })
   expect(await ui.find({ key: 'history:all' })).toBeUndefined()
   expect(await ui.find({ key: 'commit:aaaa' })).toBeDefined()
+})
+
+test('previews pictures on every surface: drawn where it can be, named elsewhere', async ($, on) => {
+  const BYTES: Record<string, string> = {
+    'photo.png': 'iVBORw0KGgoAAAANSUhEUgAAAoAAAAHgCAYAAAA=',
+    'photo.jpg': '/9j/4AAEAAD/wAARCAB4AKADAAAAAA==',
+  }
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>\n'
+  const names = ['icon.svg', 'away.png', 'photo.jpg', 'photo.png']
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('fs.list', async (_$, e) => ({
+    value: (e.path === ROOT ? names : []).map(name => ({ name, kind: 'file' as const, size: 2000, mtimeMs: 0, isLink: false })),
+  }))
+  on('fs.stat', async (_$, e) => ({
+    value: {
+      kind: 'file' as const,
+      size: 2000,
+      mtimeMs: 5,
+      isLink: e.path.endsWith('away.png'),
+      realPath: e.path.endsWith('away.png') ? '/home/me/secret.png' : e.path,
+    },
+  }))
+  const reads: string[] = []
+  on('fs.read', async (_$, e) => {
+    reads.push(e.path)
+    const name = e.path.slice(ROOT.length + 1)
+    if (e.as === 'bytes') return { value: { base64: BYTES[name] ?? '' } }
+    return { value: name === 'icon.svg' ? svg : '' }
+  })
+  on('process.run', async (_$, e) => fakeGit(e.argv, []))
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+  on('ui.panes', async () => ({ value: [] }))
+
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
+    const ui = await $.ui.mount({ ...PANE('file-explorer', 120), surface })
+    // The preview sits beside the tree where the view splits, else in its own pane.
+    const look = async (query: Parameters<typeof ui.find>[0]) => {
+      const here = await ui.find(query)
+      if (here !== undefined) return here
+      const pane = await $.ui.mount({ ...PANE('file-preview', 80), surface })
+      const found = await pane.find(query)
+      await pane.unmount()
+      return found
+    }
+
+    await ui.press({ key: 'row:photo.png' })
+    const image = await look({ type: 'Image' })
+    if (surface === 'terminal') {
+      // Read by the terminal from its real path; 640×480 kept 4:3 in 2:1 cells.
+      expect(image?.props.source).toEqual({ file: `${ROOT}/photo.png`, format: 'png', generation: 5 })
+      expect(image?.props.alt).toContain('PNG image 640×480')
+      const { columns, rows } = image?.props as { columns: number; rows: number }
+      expect(Math.abs(columns / rows / 2 - 640 / 480)).toBeLessThan(0.15)
+    } else {
+      expect(image).toBeUndefined()
+      expect(await look({ type: 'Text', text: 'PNG image 640×480' })).toBeDefined()
+      expect(await look({ type: 'Text', text: 'Pictures are drawn in the terminal (kitty, Ghostty).' })).toBeDefined()
+    }
+
+    // No clock here: the status line names the size and leaves the age out.
+    expect(await look({ type: 'Text', text: /2\.0K/ })).toBeDefined()
+    expect(await look({ type: 'Text', text: /ago/ })).toBeUndefined()
+
+    await ui.press({ key: 'row:photo.jpg' })
+    expect(await look({ type: 'Text', text: 'JPEG image 160×120' })).toBeDefined()
+    expect(await look({ type: 'Text', text: 'Only PNG is drawn; open it in a viewer to see it.' })).toBeDefined()
+    expect(await look({ type: 'Image' })).toBeUndefined()
+
+    // A picture linked from outside the project is named, never read or drawn.
+    await ui.press({ key: 'row:away.png' })
+    expect(await look({ type: 'Text', text: 'links outside the project: /home/me/secret.png' })).toBeDefined()
+    expect(await look({ type: 'Image' })).toBeUndefined()
+
+    // SVG: its source everywhere, drawn above it where the surface has Svg.
+    await ui.press({ key: 'row:icon.svg' })
+    expect(String((await look({ type: 'Code' }))?.props.source)).toContain('<rect')
+    const drawn = await look({ type: 'Svg' })
+    if (surface === 'terminal') expect(drawn).toBeUndefined()
+    else expect(drawn?.props.source).toBe(svg)
+    await ui.unmount()
+  }
+  expect(reads.some(path => path.endsWith('away.png'))).toBe(false)
 })

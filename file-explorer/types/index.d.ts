@@ -56,6 +56,9 @@ export type ExplorerPreview = {
   // The file's size and modification time, when it is on disk.
   size?: number
   mtimeMs?: number
+  // A picture: its format and size in pixels (0 when the header did not
+  // say), and the real path inside the project the terminal reads it from.
+  image?: { format: 'png' | 'jpeg' | 'gif' | 'webp'; width: number; height: number; file: string }
 }
 
 declare module 'claude-code' {
