@@ -1,6 +1,6 @@
 {
   "name": "file-explorer",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "A VS Code-style file explorer pane: tree, git decorations, preview and @-mention",
   "types": "./types/index.d.ts",
   "author": {
@@ -16,6 +16,16 @@
         "emoji",
         "nerd",
         "ascii"
+      ]
+    },
+    "language": {
+      "type": "string",
+      "title": "Help language",
+      "description": "Language of the help (i, /files help): en or ja",
+      "default": "en",
+      "options": [
+        "en",
+        "ja"
       ]
     }
   }

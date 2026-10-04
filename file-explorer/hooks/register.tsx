@@ -17,7 +17,8 @@ import { compileQuery, excerpt, fuzzyFilter, fuzzyIndex, matchSpan, parseGrep } 
 import { cellWidth, fitCells, localLinks, markdownWindow, resolveLink, splitMarkdown } from './markdown'
 import { clipDiff, hunkOffset, parseLog, parseNameStatus, sliceHunk, splitHunks } from './diff'
 import { cleanText, isPlainRelative, oneLine } from './safe'
-import { HELP } from './help'
+import { helpText } from './help'
+import type { HelpLanguage } from './help'
 import { buttonCells, fitCount, lastStart, packRows, rowsOf, shiftCells, widest } from './wrap'
 import type { IconStyle } from './icons'
 
@@ -72,7 +73,7 @@ const previewOffset = atom({ plugin: 'file-explorer', key: 'previewOffset' } as 
 const cache: { files?: string[]; lower?: string[]; turnHead?: string; rootReal?: string } = {}
 
 // What the explorer was last drawn as, so presses know where a file shows.
-const layout = { isSplit: false, sidebarColumns: 0, listRows: 20, previewRows: 20, listTotal: 0, previewTotal: 0, previewLast: 0, icons: 'emoji' as IconStyle, visible: { start: 0, end: 0 } }
+const layout = { isSplit: false, sidebarColumns: 0, listRows: 20, previewRows: 20, listTotal: 0, previewTotal: 0, previewLast: 0, icons: 'emoji' as IconStyle, language: 'en' as HelpLanguage, visible: { start: 0, end: 0 } }
 
 // VS Code's decoration colours, by the letter drawn at the row's end.
 const BADGE_COLOR: Record<string, string> = {
@@ -589,9 +590,9 @@ async function toggleHelp($: EngineInterface) {
   }
   beforeHelp.shown = shown
   const help: ExplorerPreview = {
-    path: 'Keys and commands',
+    path: layout.language === 'ja' ? 'キーとコマンド' : 'Keys and commands',
     mode: 'rendered',
-    text: HELP,
+    text: helpText(layout.language),
     diff: '',
     note: '',
     isChanged: false,
@@ -1439,6 +1440,7 @@ async function drawPreview(
 export const register: Register = (on, options) => {
   const style = options.icons
   layout.icons = style === 'nerd' || style === 'ascii' ? style : 'emoji'
+  layout.language = options.language === 'ja' ? 'ja' : 'en'
   let pending: { cancel: () => void } | undefined
 
   on('session.start', async ($, e, next) => {

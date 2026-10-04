@@ -47,6 +47,7 @@ claude --plugin-dir ./file-explorer
 - **Last prompt** base: each prompt you send snapshots the working tree (through an index of the explorer's own under `.git/`, leaving your index and stash alone), and the Changes base cycles HEAD → last prompt → default branch, so you can review just what the latest turn changed; `/changes turn` selects it
 - `#` (`r`) in the preview inserts `@path (lines a-b)`: the lines you selected with the mouse, else the lines in view; `❝` quotes now name the lines too
 - Files and folders carry icons by name and extension (📁 📂 📘 📝 🐍 …); folders also get a blue `▸`/`▾` and a trailing `/`
+- The help's language is the `language` option in `/config`: `en` (default) or `ja`
 - Icon style is the `icons` option in `/config`: `emoji` (default, any terminal), `nerd` (needs a Nerd Font; coloured like VS Code), or `ascii`
 - `i` (`?` in the sidebar) or `/files help` shows every key and command in the preview; `i` again goes back
 - Explorer: `f` Files, `c` Changes, `h` History, `s` Search
