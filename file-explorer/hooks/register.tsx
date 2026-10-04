@@ -553,16 +553,23 @@ async function quote($: EngineInterface, text: string, caption: string, language
   if (!filled.isFilled) $.ui.toast('Could not quote into the prompt')
 }
 
-async function quoteSelection($: EngineInterface, path: string) {
+// Quotes the mouse selection into the prompt, named by the file in the
+// preview and its lines when the selection is from there. Answers what it did.
+async function quoteSelection($: EngineInterface, path: string | undefined): Promise<string> {
   const shown = await read($, preview)
   const picked = await $.ui.selection()
   if (picked === undefined || picked.text.trim() === '') {
-    $.ui.toast('Select lines with the mouse first, or quote a hunk')
-    return
+    const why = 'Select lines with the mouse first (fullscreen mode), or quote a hunk'
+    $.ui.toast(why)
+    return why
   }
-  const lines = shown === null || shown.path !== path || shown.mode === 'diff' ? { start: 0, end: 0 } : await pickedLines($, shown)
+  const isPreview = picked.requestId === undefined && path !== undefined && shown !== null && shown.path === path
+  const lines = isPreview && shown.mode !== 'diff' ? await pickedLines($, shown) : { start: 0, end: 0 }
   const label = linesLabel(lines.start, lines.end)
-  await quote($, picked.text, `\`${path}\` ${label === '' ? '(selected)' : label}`, '')
+  const caption = isPreview ? `\`${path}\` ${label === '' ? '(selected)' : label}` : 'Selected'
+  await quote($, picked.text, caption, '')
+  const count = picked.text.trimEnd().split('\n').length
+  return `Quoted ${count} line${count === 1 ? '' : 's'}${isPreview ? ` of ${oneLine(path)}` : ''} into the prompt.`
 }
 
 
@@ -723,14 +730,16 @@ const linesLabel = (start: number, end: number) =>
   start <= 0 ? '' : start === end ? `line ${start}` : `lines ${start}-${end}`
 
 // `@path (lines a-b)` into the prompt: the file attached, the lines named.
-async function referenceLines($: EngineInterface, shown: ExplorerPreview) {
+async function referenceLines($: EngineInterface, shown: ExplorerPreview): Promise<string> {
   const { start, end } = await pickedLines($, shown)
   const label = linesLabel(start, end)
   const { text, cursor } = await $.prompt.read()
   const before = text.slice(0, cursor)
   const lead = before === '' || /\s$/.test(before) ? '' : ' '
-  const filled = await $.prompt.fill({ text: `${lead}@${shown.path}${label === '' ? '' : ` (${label})`} `, mode: 'insert' })
+  const reference = `@${shown.path}${label === '' ? '' : ` (${label})`}`
+  const filled = await $.prompt.fill({ text: `${lead}${reference} `, mode: 'insert' })
   if (!filled.isFilled) $.ui.toast(`Could not insert @${oneLine(shown.path)}`)
+  return filled.isFilled ? `Inserted ${oneLine(reference)}.` : `Could not insert @${oneLine(shown.path)}.`
 }
 
 // ---- drawing -------------------------------------------------------------
@@ -1402,6 +1411,18 @@ export const register: Register = (on, options) => {
       description: 'Open the file explorer',
       argumentHint: '[files|changes|history|search]',
     })
+    // A mouse selection leaves the keys with the prompt, where the pane's
+    // q and r never arrive: these do the same from the prompt.
+    await $.command.register({
+      name: 'quote',
+      description: 'Quote the mouse selection into the prompt (from the explorer preview: with its file and lines)',
+      immediate: true,
+    })
+    await $.command.register({
+      name: 'ref',
+      description: 'Insert @file (lines a-b) for the selection in the explorer preview, or the lines in view',
+      immediate: true,
+    })
     await $.command.register({
       name: 'search',
       description: 'Search file contents with ripgrep, shown in the explorer',
@@ -1427,6 +1448,17 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'files' }, async ($, e) => {
     const opened = await openExplorer($, e.args.trim())
     return { text: opened.isPlaced ? 'Explorer opened.' : `Explorer not shown: ${opened.reason}` }
+  })
+
+  on('command.run', { command: 'quote' }, async $ => {
+    const shown = await read($, preview)
+    return { text: await quoteSelection($, shown?.path) }
+  })
+
+  on('command.run', { command: 'ref' }, async $ => {
+    const shown = await read($, preview)
+    if (shown === null) return { text: 'Open a file in the explorer first.' }
+    return { text: await referenceLines($, shown) }
   })
 
   on('command.run', { command: 'search' }, async ($, e) => {
