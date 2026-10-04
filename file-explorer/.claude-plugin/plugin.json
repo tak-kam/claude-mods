@@ -1,6 +1,6 @@
 {
   "name": "file-explorer",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "description": "A VS Code-style file explorer pane: tree, git decorations, preview and @-mention",
   "types": "./types/index.d.ts",
   "author": {
@@ -32,6 +32,16 @@
       "type": "string",
       "title": "Mermaid diagrams",
       "description": "Draw ```mermaid blocks in the markdown preview with your own mermaid-cli (mmdc) when it is installed: auto, or off to never run it",
+      "default": "auto",
+      "options": [
+        "auto",
+        "off"
+      ]
+    },
+    "pictures": {
+      "type": "string",
+      "title": "Picture converters",
+      "description": "Draw JPEG, GIF, WebP and SVG in the terminal by converting them to PNG with a tool you have (sips, ffmpeg, ImageMagick; rsvg-convert for SVG): auto, or off to never run one",
       "default": "auto",
       "options": [
         "auto",

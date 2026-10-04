@@ -24,6 +24,8 @@ import { hasOutline, outlineOf } from './outline'
 import { isDelimited, isJson, isJsonLines, jsonRows, parseDelimited, parseJson, parseJsonLines, tableLines } from './data'
 import type { JsonNode, JsonRow } from './data'
 import { decodeBase64, imageCells, imageFormatOf, imageInfo } from './image'
+import { pickRaster, rasterArgs, SIPS, svgArgs, convertError } from './convert'
+import type { Converters, RasterTool } from './convert'
 import { cacheFolder, diagramKey, isMermaid, MAX_DIAGRAM_CHARS, mmdcArgs, mmdcError } from './mermaid'
 import type { OutlineEntry, OutlineKind } from './outline'
 import type { HelpLanguage } from './help'
@@ -81,6 +83,8 @@ const historyOf = atom({ plugin: 'file-explorer', key: 'historyOf' } as const, '
 const fileHistory = atom({ plugin: 'file-explorer', key: 'fileHistory' } as const, [])
 const blame = atom({ plugin: 'file-explorer', key: 'blame' } as const, null)
 const diagrams = atom({ plugin: 'file-explorer', key: 'diagrams' } as const, {})
+const pictures = atom({ plugin: 'file-explorer', key: 'pictures' } as const, {})
+const converters = atom({ plugin: 'file-explorer', key: 'converters' } as const, null)
 const mermaidTool = atom({ plugin: 'file-explorer', key: 'mermaidTool' } as const, 'unknown')
 const symbol = atom({ plugin: 'file-explorer', key: 'symbol' } as const, null)
 const dataView = atom({ plugin: 'file-explorer', key: 'dataView' } as const, { path: '', toggled: [], pick: '' })
@@ -106,7 +110,7 @@ const cache: {
 } = {}
 
 // What the explorer was last drawn as, so presses know where a file shows.
-const layout = { isSplit: false, sidebarColumns: 0, listRows: 20, previewRows: 20, listTotal: 0, previewTotal: 0, previewLast: 0, icons: 'emoji' as IconStyle, language: 'en' as HelpLanguage, visible: { start: 0, end: 0 }, mermaid: 'auto' as 'auto' | 'off' }
+const layout = { isSplit: false, sidebarColumns: 0, listRows: 20, previewRows: 20, listTotal: 0, previewTotal: 0, previewLast: 0, icons: 'emoji' as IconStyle, language: 'en' as HelpLanguage, visible: { start: 0, end: 0 }, mermaid: 'auto' as 'auto' | 'off', pictures: 'auto' as 'auto' | 'off' }
 
 // VS Code's decoration colours, by the letter drawn at the row's end.
 const BADGE_COLOR: Record<string, string> = {
@@ -650,17 +654,103 @@ async function hasMmdc($: EngineInterface): Promise<boolean> {
 
 // The person's own cache folder for drawings, made private (0700) by node,
 // which mmdc needs anyway: never a shared temp another user could seed.
-async function diagramFolder($: EngineInterface): Promise<string | undefined> {
+async function diagramFolder($: EngineInterface, kind = 'mermaid'): Promise<string | undefined> {
   const folder = cacheFolder({
     xdg: await $.env.get('XDG_CACHE_HOME'),
     home: (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE')),
     localAppData: await $.env.get('LOCALAPPDATA'),
-  })
+  }, kind)
   if (folder === undefined) return undefined
   const made = await $.process
     .run(['node', '-e', "require('fs').mkdirSync(process.argv[1], { recursive: true, mode: 0o700 })", folder], { timeoutMs: 10000 })
     .catch(() => undefined)
   return made?.exitCode === 0 ? folder : undefined
+}
+
+// ---- picture conversion ----------------------------------------------------
+
+const MAX_SVG_BYTES = 4 * 1024 * 1024
+
+// The converters on this machine, looked for once (again after a refresh).
+async function findConverters($: EngineInterface): Promise<Converters> {
+  const known = await read($, converters)
+  if (known !== null) return known
+  const answers = async (argv: string[], says?: RegExp) => {
+    const ran = await $.process.run(argv, { timeoutMs: 10000 }).catch(() => undefined)
+    return ran !== undefined && ran.exitCode === 0 && (says === undefined || says.test(`${ran.stdout}${ran.stderr}`))
+  }
+  const present: Partial<Record<RasterTool, boolean>> = {
+    sips: await $.fs.exists(SIPS).catch(() => false),
+    ffmpeg: await answers(['ffmpeg', '-version']),
+    magick: await answers(['magick', '-version'], /ImageMagick/),
+  }
+  // ImageMagick 6 is `convert`, a name Windows also uses for another tool.
+  if (present.magick !== true) present.convert = await answers(['convert', '-version'], /ImageMagick/)
+  const found: Converters = {
+    raster: pickRaster(present),
+    svg: (await answers(['rsvg-convert', '--version'])) ? 'rsvg-convert' : undefined,
+  }
+  await update($, converters, () => found)
+  return found
+}
+
+// A converted picture's key: the file's path, time and size, so an edit
+// converts again and nothing else does.
+const pictureKey = (shown: ExplorerPreview) => diagramKey(`${shown.path}\0${Math.round(shown.mtimeMs ?? 0)}\0${shown.size ?? 0}`)
+
+// What the shown file would convert from: a JPEG/GIF/WebP, or an SVG.
+const convertible = (shown: ExplorerPreview): 'raster' | 'svg' | undefined =>
+  shown.mode !== 'file' || !shown.isOnDisk
+    ? undefined
+    : shown.image !== undefined && shown.image.format !== 'png'
+      ? 'raster'
+      : /\.svg$/i.test(shown.path) && shown.text !== ''
+        ? 'svg'
+        : undefined
+
+// Converts the shown picture to a PNG in the person's private cache, with a
+// tool they have; the terminal then draws that.
+async function convertPicture($: EngineInterface) {
+  if (layout.pictures === 'off') return
+  const shown = await read($, preview)
+  if (shown === null) return
+  const kind = convertible(shown)
+  if (kind === undefined) return
+  const key = pictureKey(shown)
+  if ((await read($, pictures))[key] !== undefined) return
+  const found = await findConverters($)
+  const tool = kind === 'raster' ? found.raster : found.svg
+  if (tool === undefined) return
+  // The input is the file's real path inside the project, never a link out.
+  const stat = await $.fs.stat(join(await read($, root), shown.path), { resolve: true }).catch(() => undefined)
+  const real = stat?.realPath ?? ''
+  const inside = cache.rootReal !== undefined && real.startsWith(`${cache.rootReal}/`)
+  if (!inside || stat === undefined || (kind === 'svg' && stat.size > MAX_SVG_BYTES)) return
+  const folder = await diagramFolder($, 'pictures')
+  if (folder === undefined) return
+  const output = `${folder}/${key}.png`
+  await update($, pictures, all => ({ ...all, [key]: { status: 'drawing' as const } }))
+  let failed: string | undefined
+  if (!(await $.fs.exists(output).catch(() => false))) {
+    let argv: string[]
+    try {
+      argv = kind === 'raster' ? rasterArgs(tool as RasterTool, shown.image?.format ?? 'jpeg', real, output) : svgArgs(real, output)
+    } catch {
+      argv = []
+    }
+    const ran = argv.length === 0 ? undefined : await $.process.run(argv, { timeoutMs: 30000 }).catch(() => undefined)
+    failed = ran === undefined ? `${tool} did not finish.` : ran.exitCode === 0 ? undefined : convertError(ran.stderr, tool)
+  }
+  if (failed !== undefined) {
+    await update($, pictures, all => ({ ...all, [key]: { status: 'error' as const, error: failed } }))
+    return
+  }
+  const head = await $.fs.read(output, { as: 'bytes' }).catch(() => undefined)
+  const info = typeof head?.base64 === 'string' ? imageInfo(decodeBase64(head.base64, 64)) : undefined
+  const drawn: ExplorerDiagram = info?.format === 'png'
+    ? { status: 'ok', png: output, width: info.width, height: info.height }
+    : { status: 'error', error: `${tool} wrote no PNG.` }
+  await update($, pictures, all => ({ ...all, [key]: drawn }))
 }
 
 // Draws the shown markdown's mermaid blocks with mmdc, one after another, a
@@ -786,6 +876,9 @@ async function showPath($: EngineInterface, rel: string, options: { mode?: Explo
     await update($, sideways, () => 0)
   }
   await update($, preview, () => shown)
+  if (layout.pictures === 'auto' && convertible(shown) !== undefined) {
+    $.clock.after(0, () => void convertPicture($).catch(() => undefined))
+  }
   if (mode === 'rendered' && layout.mermaid === 'auto' && /^\s*(`{3,}|~{3,})\s*(mermaid|mmd)\b/im.test(shown.text)) {
     $.clock.after(0, () => void drawDiagrams($).catch(() => undefined))
   }
@@ -944,6 +1037,8 @@ async function refreshAll($: EngineInterface) {
   await loadHistory($)
   // A newly installed mmdc is found, and failed diagrams are tried again.
   await update($, mermaidTool, () => 'unknown')
+  await update($, converters, () => null)
+  await update($, pictures, all => Object.fromEntries(Object.entries(all).filter(([, one]) => one.status === 'ok')))
   await update($, diagrams, all => Object.fromEntries(Object.entries(all).filter(([, one]) => one.status === 'ok')))
   const narrowed = await read($, historyOf)
   if (narrowed !== '') await loadFileLog($, narrowed)
@@ -1914,12 +2009,28 @@ async function drawPreview(
   // Pictures: PNG drawn where the surface has Image (the terminal, in
   // kitty or Ghostty; its alt text elsewhere), the rest named with their size.
   const picture = shown.mode === 'file' ? shown.image : undefined
+  // A JPEG/GIF/WebP or SVG converted to PNG by the person's own tool.
+  const converted = layout.pictures === 'auto' && convertible(shown) !== undefined ? (await read($, pictures))[pictureKey(shown)] : undefined
+  const found = layout.pictures === 'auto' ? await read($, converters) : null
+  const drawConverted = (Image: ElementTable<'terminal'>['Image'], alt: string) => {
+    if (converted?.status !== 'ok' || converted.png === undefined) return false
+    const box = imageCells(converted.width ?? 0, converted.height ?? 0, width - 1, rows === undefined ? 40 : room)
+    body.push(<Image key="converted" source={{ file: converted.png, format: 'png' }} columns={box.columns} rows={box.rows} alt={alt} />)
+    return true
+  }
+  const convertNote = (missing: string) => {
+    if (converted?.status === 'drawing') body.push(<Text key="convert-note" dimColor>Converting to draw it…</Text>)
+    else if (converted?.status === 'error') body.push(<Text key="convert-note" color="red">{fit(converted.error ?? 'conversion failed', Math.max(8, width - 2))}</Text>)
+    else if (found !== null && converted === undefined && missing !== '') body.push(<Text key="convert-note" dimColor>{missing}</Text>)
+  }
   if (picture !== undefined) {
     // Only the terminal's table has Image; another surface's has none to draw.
     const Image = surface === 'terminal' ? (els as ElementTable<'terminal'>).Image : undefined
     const dims = picture.width > 0 ? ` ${picture.width}×${picture.height}` : ''
     const kind = picture.format.toUpperCase()
-    if (picture.format === 'png' && Image !== undefined) {
+    if (picture.format !== 'png' && Image !== undefined && drawConverted(Image, `${kind} image${dims} (pictures show in kitty and Ghostty)`)) {
+      // Drawn from the converted PNG.
+    } else if (picture.format === 'png' && Image !== undefined) {
       const box = imageCells(picture.width, picture.height, width - 1, rows === undefined ? 40 : room)
       body.push(
         <Image
@@ -1932,13 +2043,26 @@ async function drawPreview(
       )
     } else {
       body.push(<Text>{`${kind} image${dims}`}</Text>)
-      body.push(
-        <Text dimColor>
-          {picture.format !== 'png'
-            ? 'Only PNG is drawn; open it in a viewer to see it.'
-            : 'Pictures are drawn in the terminal (kitty, Ghostty).'}
-        </Text>,
-      )
+      if (picture.format !== 'png' && Image !== undefined && layout.pictures === 'auto' && (found?.raster !== undefined || converted !== undefined)) {
+        convertNote('')
+      } else {
+        body.push(
+          <Text dimColor>
+            {picture.format === 'png'
+              ? 'Pictures are drawn in the terminal (kitty, Ghostty).'
+              : Image !== undefined && layout.pictures === 'auto' && found !== null
+                ? 'Install ffmpeg or ImageMagick to draw JPEG, GIF and WebP here.'
+                : 'Only PNG is drawn; open it in a viewer to see it.'}
+          </Text>,
+        )
+      }
+    }
+  }
+  // SVG in the terminal: the converted PNG above its source.
+  if (surface === 'terminal' && convertible(shown) === 'svg' && offset === 0) {
+    const Image = (els as ElementTable<'terminal'>).Image
+    if (!drawConverted(Image, `${baseName(shown.path)} (pictures show in kitty and Ghostty)`)) {
+      convertNote(found !== null && found.svg === undefined ? 'Install rsvg-convert (librsvg) to draw SVG here.' : '')
     }
   }
   // SVG is source, drawn above it where the surface has Svg.
@@ -2071,6 +2195,7 @@ export const register: Register = (on, options) => {
   layout.icons = style === 'nerd' || style === 'ascii' ? style : 'emoji'
   layout.language = options.language === 'ja' ? 'ja' : 'en'
   layout.mermaid = options.mermaid === 'off' ? 'off' : 'auto'
+  layout.pictures = options.pictures === 'off' ? 'off' : 'auto'
   let pending: { cancel: () => void } | undefined
 
   on('session.start', async ($, e, next) => {

@@ -52,7 +52,7 @@ CSV and TSV open as a table (\`◀\` \`▶\` scroll wide ones sideways); JSON an
 
 ## Pictures
 
-PNG files are drawn in the preview where the terminal can show pictures (kitty, Ghostty); elsewhere, and for JPEG, GIF and WebP, the preview names the format and size. SVG opens as its source, drawn above it in the desktop and VS Code apps.
+PNG files are drawn in the preview where the terminal can show pictures (kitty, Ghostty). JPEG, GIF and WebP are drawn there too when a converter you have turns them into PNG (macOS's \`sips\`, \`ffmpeg\` or ImageMagick), and SVG above its source with \`rsvg-convert\`; none is ever installed for you. Without one, the preview names the format and size. The desktop and VS Code apps draw SVG themselves. The \`pictures\` option in \`/config\` turns conversion off; \`↻\` looks for converters again.
 
 ## Diagrams
 
@@ -123,7 +123,7 @@ CSV と TSV は表で開きます（幅が広いときは \`◀\` \`▶\` で横
 
 ## 画像
 
-PNG は画像を表示できるターミナル（kitty、Ghostty）ならプレビューに描画します。それ以外の環境や JPEG・GIF・WebP では、形式とサイズを表示します。SVG はソースで開き、デスクトップと VS Code ではその上に描画します。
+PNG は画像を表示できるターミナル（kitty、Ghostty）ならプレビューに描画します。JPEG・GIF・WebP も、手元の変換ツール（macOS の \`sips\`、\`ffmpeg\`、ImageMagick）で PNG にして描画します。SVG は \`rsvg-convert\` があればソースの上に描画します。ツールを自動でインストールすることはなく、無ければ形式とサイズを表示します。デスクトップと VS Code は SVG をそのまま描画します。\`/config\` の \`pictures\` で変換をオフにでき、\`↻\` で変換ツールを探し直します。
 
 ## 図（Mermaid）
 

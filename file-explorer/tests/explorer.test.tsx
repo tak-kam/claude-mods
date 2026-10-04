@@ -1473,3 +1473,105 @@ test('with mermaid off, never runs mmdc', { options: { mermaid: 'off' } }, async
   expect(runs).toEqual([])
   expect(await ui.find({ text: /mermaid-cli/ })).toBeUndefined()
 })
+
+function pictureHooks(on: TestOn, runs: string[][], tools: { ffmpeg?: boolean; rsvg?: boolean; fail?: boolean }) {
+  const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAoAAAAHgCAYAAAA='
+  const JPG = '/9j/4AAEAAD/wAARCAB4AKADAAAAAA=='
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('env.get', async (_$, e) => ({ value: e.name === 'HOME' ? '/home/me' : undefined }))
+  on('fs.list', async (_$, e) => ({
+    value: (e.path === ROOT ? ['photo.jpg', 'icon.svg'] : []).map(name => ({ name, kind: 'file' as const, size: 2000, mtimeMs: 7, isLink: false })),
+  }))
+  on('fs.stat', async (_$, e) => ({ value: { kind: e.path === ROOT ? ('dir' as const) : ('file' as const), size: 2000, mtimeMs: 7, isLink: false, realPath: e.path } }))
+  on('fs.exists', async () => ({ value: false }))
+  on('fs.read', async (_$, e) => {
+    if (e.path.startsWith('/home/me/.cache/')) return { value: { base64: PNG } }
+    if (e.as === 'bytes') return { value: { base64: JPG } }
+    return { value: '<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"/>\n' }
+  })
+  on('process.run', async (_$, e) => {
+    if (e.argv[0] === 'git') return fakeGit(e.argv, [])
+    runs.push([...e.argv])
+    const [tool, first] = e.argv
+    if (tool === 'node') return ok('')
+    if (tool === 'ffmpeg' && first === '-version') return tools.ffmpeg ? ok('ffmpeg version 6') : Promise.reject(new Error('ENOENT'))
+    if (tool === 'rsvg-convert' && first === '--version') return tools.rsvg ? ok('rsvg-convert version 2.58') : Promise.reject(new Error('ENOENT'))
+    if (tool === 'magick' || tool === 'convert') return Promise.reject(new Error('ENOENT'))
+    if (tools.fail) return { value: { exitCode: 1, stdout: '', stderr: 'Invalid data found when processing input\n', isStdoutTruncated: false, isStderrTruncated: false } }
+    return ok('')
+  })
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+  on('ui.panes', async () => ({ value: [] }))
+}
+
+test('converts JPEG and SVG to PNG with tools the person has, and draws that', async ($, on) => {
+  const runs: string[][] = []
+  const clock = mock.clock(on)
+  pictureHooks(on, runs, { ffmpeg: true, rsvg: true })
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE('file-explorer', 120))
+
+  await ui.press({ key: 'row:photo.jpg' })
+  await clock.settle()
+  const ffmpeg = runs.find(argv => argv[0] === 'ffmpeg' && argv.includes('-i'))
+  expect(ffmpeg).toContain(`file:${ROOT}/photo.jpg`)
+  expect(String(ffmpeg?.at(-1))).toMatch(/^file:\/home\/me\/\.cache\/claude-file-explorer\/pictures\/[0-9a-f]+\.png$/)
+  const image = await ui.find({ type: 'Image' })
+  expect(String((image?.props.source as { file: string }).file)).toBe(String(ffmpeg?.at(-1)).slice('file:'.length))
+  expect(image?.props.alt).toContain('JPEG image 160×120')
+
+  await ui.press({ key: 'row:icon.svg' })
+  await clock.settle()
+  const rsvg = runs.find(argv => argv[0] === 'rsvg-convert' && argv.includes('--output'))
+  expect(rsvg?.at(-1)).toBe(`${ROOT}/icon.svg`)
+  expect(await ui.find({ type: 'Image' })).toBeDefined()
+  expect(String((await ui.find({ type: 'Code' }))?.props.source)).toContain('<svg')
+
+  // Converters are looked for once; opening again converts nothing.
+  const before = runs.length
+  await ui.press({ key: 'row:photo.jpg' })
+  await clock.settle()
+  expect(runs.length).toBe(before)
+  expect(runs.filter(argv => argv.join(' ') === 'ffmpeg -version')).toHaveLength(1)
+})
+
+test('without converters, says what to install; a failed one says why', async ($, on) => {
+  const runs: string[][] = []
+  const clock = mock.clock(on)
+  pictureHooks(on, runs, {})
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE('file-explorer', 120))
+  await ui.press({ key: 'row:photo.jpg' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: 'Install ffmpeg or ImageMagick to draw JPEG, GIF and WebP here.' })).toBeDefined()
+  await ui.press({ key: 'row:icon.svg' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: 'Install rsvg-convert (librsvg) to draw SVG here.' })).toBeDefined()
+  expect(await ui.find({ type: 'Image' })).toBeUndefined()
+})
+
+test('a converter that fails is named with its error', async ($, on) => {
+  const runs: string[][] = []
+  const clock = mock.clock(on)
+  pictureHooks(on, runs, { ffmpeg: true, fail: true })
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE('file-explorer', 120))
+  await ui.press({ key: 'row:photo.jpg' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: 'Invalid data found when processing input' })).toBeDefined()
+  expect(await ui.find({ type: 'Image' })).toBeUndefined()
+})
+
+test('with pictures off, never runs a converter', { options: { pictures: 'off' } }, async ($, on) => {
+  const runs: string[][] = []
+  const clock = mock.clock(on)
+  pictureHooks(on, runs, { ffmpeg: true, rsvg: true })
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE('file-explorer', 120))
+  await ui.press({ key: 'row:photo.jpg' })
+  await ui.press({ key: 'row:icon.svg' })
+  await clock.settle()
+  expect(runs).toEqual([])
+  expect(await ui.find({ type: 'Image' })).toBeUndefined()
+})
