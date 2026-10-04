@@ -50,6 +50,8 @@ export type ExplorerPreview = {
   note: string
   isChanged: boolean
   isOnDisk: boolean
+  // The keys and commands, not a file: never reloaded from disk.
+  isHelp?: boolean
 }
 
 declare module 'claude-code' {

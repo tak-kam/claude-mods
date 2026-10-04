@@ -1,5 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import { buttonCells } from '../hooks/wrap'
+import { HELP } from '../hooks/help'
 
 const ROOT = '/work/app'
 
@@ -892,4 +893,44 @@ test('quotes and references the selection from the prompt with /quote and /ref',
   selection = undefined
   ran = await $.command.run({ command: 'quote' } as never)
   expect((ran as { text?: string }).text).toContain('Select lines with the mouse first')
+})
+
+test('shows the keys and commands as help, and every hotkey drawn is in it', async ($, on) => {
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('fs.stat', async (_$, e) => STAT(e.path))
+  on('fs.list', async (_$, e) => ({
+    value: (TREE[e.path] ?? []).map(one => ({ ...one, mtimeMs: 0, isLink: false })),
+  }))
+  on('fs.read', async () => ({ value: `${'x'.repeat(200)}\n`.repeat(50) }))
+  on('process.run', async (_$, e) => fakeGit(e.argv, []))
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+  on('ui.panes', async () => ({ value: [{ id: 'file-explorer', title: 'Explorer', isShown: true, isFocused: true, isPlaced: true }] }))
+
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE('file-explorer', 140))
+  await ui.press({ key: 'row:src' })
+  await ui.press({ key: 'row:src/main.ts' })
+  await ui.press({ key: 'wrap' })
+
+  // Every hotkey on screen, sidebar and preview, is explained in the help.
+  const hotkeys = (await ui.findAll({ type: 'Button' }))
+    .map(one => one.props.hotkey)
+    .filter((key): key is string => typeof key === 'string')
+  expect(hotkeys.length).toBeGreaterThan(10)
+  for (const key of new Set(hotkeys)) expect(HELP).toContain(`\`${key}\``)
+
+  // i shows the help in the preview; refresh leaves it; i again goes back.
+  await ui.press({ key: 'help' })
+  expect(await ui.find({ type: 'Text', text: /Keys and commands/ })).toBeDefined()
+  expect(await ui.find({ type: 'Code' })).toBeUndefined()
+  expect(await ui.find({ key: 'quote' })).toBeUndefined()
+  await ui.press({ key: 'refresh' })
+  expect(await ui.find({ type: 'Text', text: /Keys and commands/ })).toBeDefined()
+  await ui.press({ key: 'help' })
+  expect((await ui.find({ type: 'Code' }))?.props.path).toBe('src/main.ts')
+
+  // /files help opens it too.
+  await $.command.run({ command: 'files', args: 'help' } as never)
+  expect(await ui.find({ type: 'Text', text: /Keys and commands/ })).toBeDefined()
 })

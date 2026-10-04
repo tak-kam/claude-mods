@@ -17,6 +17,7 @@ import { compileQuery, excerpt, fuzzyFilter, fuzzyIndex, matchSpan, parseGrep } 
 import { cellWidth, fitCells, localLinks, markdownWindow, resolveLink, splitMarkdown } from './markdown'
 import { clipDiff, hunkOffset, parseLog, parseNameStatus, sliceHunk, splitHunks } from './diff'
 import { cleanText, isPlainRelative, oneLine } from './safe'
+import { HELP } from './help'
 import { buttonCells, fitCount, lastStart, packRows, rowsOf, shiftCells, widest } from './wrap'
 import type { IconStyle } from './icons'
 
@@ -526,7 +527,7 @@ async function reveal($: EngineInterface, rel: string) {
 
 async function reloadPreview($: EngineInterface) {
   const shown = await read($, preview)
-  if (shown === null) return
+  if (shown === null || shown.isHelp === true) return
   const isOpen = !layout.isSplit && (await $.ui.panes()).some(pane => pane.id === PREVIEW)
   const isSplitOpen = layout.isSplit && (await $.ui.panes()).some(pane => pane.id === EXPLORER)
   if (isOpen || isSplitOpen) {
@@ -573,6 +574,34 @@ async function quoteSelection($: EngineInterface, path: string | undefined): Pro
 }
 
 
+
+// The help takes the preview's place; `i` again brings back what was there.
+const beforeHelp: { shown?: ExplorerPreview | null } = {}
+
+async function toggleHelp($: EngineInterface) {
+  const shown = await read($, preview)
+  if (shown?.isHelp === true) {
+    const back = beforeHelp.shown ?? null
+    beforeHelp.shown = undefined
+    if (back === null) await update($, preview, () => null)
+    else await showPath($, back.path, { mode: back.mode })
+    return
+  }
+  beforeHelp.shown = shown
+  const help: ExplorerPreview = {
+    path: 'Keys and commands',
+    mode: 'rendered',
+    text: HELP,
+    diff: '',
+    note: '',
+    isChanged: false,
+    isOnDisk: false,
+    isHelp: true,
+  }
+  await update($, preview, () => help)
+  await update($, previewOffset, () => 0)
+  if (!layout.isSplit) await $.ui.open({ id: PREVIEW, title: 'Help' })
+}
 
 async function refreshAll($: EngineInterface) {
   const open = await read($, expanded)
@@ -846,6 +875,11 @@ async function drawSidebar(
     tab('changes', `${isRoomy ? 'Changes' : 'Chg'} ${list.length}`, 'c'),
     tab('history', isRoomy ? 'History' : 'Log', 'h'),
     tab('search', isRoomy ? 'Search' : 'Find', 's'),
+    {
+      key: 'help',
+      cells: buttonCells('?', true),
+      draw: () => <Button key="help" label="?" plain hotkey="i" onPress={() => toggleHelp($)} />,
+    },
   ]
   // Always drawn in the split view, dim when the list fits: these sit
   // before the search field, and a control appearing or vanishing there as
@@ -1194,8 +1228,10 @@ async function drawPreview(
     )))
     tools.push(tool('right', '▶', undefined, () => <Button key="right" label="▶" plain onPress={() => late.slide(1)} />))
   }
-  tools.push(tool('quote', '❝', 'q', () => <Button key="quote" label="❝" plain hotkey="q" onPress={() => quoteSelection($, shown.path)} />))
-  tools.push(tool('ref', '#', 'r', () => <Button key="ref" label="#" plain hotkey="r" onPress={() => referenceLines($, shown)} />))
+  if (shown.isHelp !== true) {
+    tools.push(tool('quote', '❝', 'q', () => <Button key="quote" label="❝" plain hotkey="q" onPress={() => quoteSelection($, shown.path)} />))
+    tools.push(tool('ref', '#', 'r', () => <Button key="ref" label="#" plain hotkey="r" onPress={() => referenceLines($, shown)} />))
+  }
   if (isOwnPane) {
     tools.push(tool('mention', '@', undefined, () => <Button key="mention" label="@" plain onPress={() => mention($, shown.path)} />))
     tools.push(tool('close', '✕', undefined, () => (
@@ -1409,7 +1445,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'files',
       description: 'Open the file explorer',
-      argumentHint: '[files|changes|history|search]',
+      argumentHint: '[files|changes|history|search|help]',
     })
     // A mouse selection leaves the keys with the prompt, where the pane's
     // q and r never arrive: these do the same from the prompt.
@@ -1447,6 +1483,7 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'files' }, async ($, e) => {
     const opened = await openExplorer($, e.args.trim())
+    if (e.args.trim() === 'help' && (await read($, preview))?.isHelp !== true) await toggleHelp($)
     return { text: opened.isPlaced ? 'Explorer opened.' : `Explorer not shown: ${opened.reason}` }
   })
 
