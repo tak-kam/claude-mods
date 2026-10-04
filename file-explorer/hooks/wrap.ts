@@ -69,3 +69,34 @@ export function widest(lines: readonly string[]): number {
   for (const line of lines) most = Math.max(most, cellWidth(expandTabs(line)))
   return most
 }
+
+// Cells a Button takes on the terminal: a hotkey is drawn before a plain
+// label as `w: ↩`. Symbols outside ASCII count two, since terminals set to
+// East Asian ambiguous-wide draw ▲ ↩ ❝ that way.
+export function buttonCells(label: string, hasHotkey: boolean): number {
+  let cells = 0
+  for (const char of label) cells += char.charCodeAt(0) < 0x80 ? 1 : Math.max(2, cellWidth(char))
+  return cells + (hasHotkey ? 3 : 0)
+}
+
+// Items packed into rows of `room` cells with one-cell gaps, in order: a
+// toolbar laid out the way it will draw, so no Button falls off the edge
+// (a Button not drawn has no hotkey).
+export function packRows<T extends { cells: number }>(items: readonly T[], room: number): T[][] {
+  const rows: T[][] = []
+  let row: T[] = []
+  let used = 0
+  for (const item of items) {
+    const need = row.length === 0 ? item.cells : used + 1 + item.cells
+    if (row.length > 0 && need > room) {
+      rows.push(row)
+      row = [item]
+      used = item.cells
+    } else {
+      row.push(item)
+      used = need
+    }
+  }
+  if (row.length > 0) rows.push(row)
+  return rows
+}

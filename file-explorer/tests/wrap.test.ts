@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { expandTabs, fitCount, lastStart, rowsOf, shiftCells, widest } from '../hooks/wrap'
+import { buttonCells, expandTabs, fitCount, lastStart, packRows, rowsOf, shiftCells, widest } from '../hooks/wrap'
 
 describe('expandTabs', () => {
   test('pads to the next stop of four', () => {
@@ -67,5 +67,33 @@ describe('shiftCells and widest', () => {
   test('measure the widest line in cells', () => {
     expect(widest(['ab', '日本語', '\tx'])).toBe(6)
     expect(widest([])).toBe(0)
+  })
+})
+
+describe('buttonCells', () => {
+  test('counts the hotkey prefix and symbols as two', () => {
+    expect(buttonCells('Files', true)).toBe(8)
+    expect(buttonCells('Files', false)).toBe(5)
+    expect(buttonCells('↩', true)).toBe(5)
+    expect(buttonCells('#', true)).toBe(4)
+    expect(buttonCells('▲', false)).toBe(2)
+  })
+})
+
+describe('packRows', () => {
+  const item = (cells: number) => ({ cells })
+
+  test('keeps a row within the room, gaps counted', () => {
+    expect(packRows([item(4), item(4), item(4)], 9).map(row => row.length)).toEqual([2, 1])
+    expect(packRows([item(4), item(4)], 8).map(row => row.length)).toEqual([1, 1])
+    expect(packRows([item(3), item(3), item(3)], 11).map(row => row.length)).toEqual([3])
+  })
+
+  test('puts an item wider than the room on a row of its own', () => {
+    expect(packRows([item(2), item(20), item(2)], 10).map(row => row.length)).toEqual([1, 1, 1])
+  })
+
+  test('packs nothing into nothing', () => {
+    expect(packRows([], 10)).toEqual([])
   })
 })

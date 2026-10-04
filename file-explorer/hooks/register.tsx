@@ -17,7 +17,7 @@ import { compileQuery, excerpt, fuzzyFilter, fuzzyIndex, matchSpan, parseGrep } 
 import { cellWidth, fitCells, localLinks, markdownWindow, resolveLink, splitMarkdown } from './markdown'
 import { clipDiff, hunkOffset, parseLog, parseNameStatus, sliceHunk, splitHunks } from './diff'
 import { cleanText, isPlainRelative, oneLine } from './safe'
-import { fitCount, lastStart, rowsOf, shiftCells, widest } from './wrap'
+import { buttonCells, fitCount, lastStart, packRows, rowsOf, shiftCells, widest } from './wrap'
 import type { IconStyle } from './icons'
 
 const EXPLORER = 'file-explorer'
@@ -799,7 +799,47 @@ async function drawSidebar(
   const against = await read($, base)
 
   let lines: { key: string; node: () => RenderElement }[] = []
-  let fixed = 2
+  // The tabs and the list's scroll Buttons, measured and packed into rows
+  // that fit the sidebar: a Button pushed off the edge loses its hotkey.
+  const isRoomy = width >= 44
+  type Tab = { key: string; cells: number; draw: () => RenderElement }
+  const tab = (key: ExplorerView, label: string, hotkey: string): Tab => ({
+    key,
+    cells: buttonCells(label, true),
+    draw: () => (
+      <Button key={`tab:${key}`} label={label} plain hotkey={hotkey} dimColor={current === key ? undefined : true}
+        onPress={() => update($, view, () => key)} />
+    ),
+  })
+  const tabItems: Tab[] = [
+    tab('files', 'Files', 'f'),
+    tab('changes', `${isRoomy ? 'Changes' : 'Chg'} ${list.length}`, 'c'),
+    tab('history', isRoomy ? 'History' : 'Log', 'h'),
+    tab('search', isRoomy ? 'Search' : 'Find', 's'),
+  ]
+  // Always drawn in the split view, dim when the list fits: these sit
+  // before the search field, and a control appearing or vanishing there as
+  // results change moved the focus off the field mid-typing.
+  if (rows !== undefined) {
+    tabItems.push({
+      key: 'list:up',
+      cells: buttonCells('▲', false),
+      draw: () => (
+        <Button key="list:up" label="▲" plain dimColor={isOver ? undefined : true}
+          onPress={() => scroll(-Math.max(1, room - 2))} />
+      ),
+    })
+    tabItems.push({
+      key: 'list:down',
+      cells: buttonCells('▼', false),
+      draw: () => (
+        <Button key="list:down" label="▼" plain dimColor={isOver ? undefined : true}
+          onPress={() => scroll(Math.max(1, room - 2))} />
+      ),
+    })
+  }
+  const tabRows = packRows(tabItems, Math.max(8, width))
+  let fixed = 1 + tabRows.length
   const extra: RenderElement[] = []
 
   if (current === 'search') {
@@ -1001,32 +1041,11 @@ async function drawSidebar(
           />
         </Box>
       </Box>
-      <Box flexDirection="row" justifyContent="space-between">
-        <Box flexDirection="row" gap={1}>
-          <Button key="tab:files" label="Files" plain hotkey="f" dimColor={current === 'files' ? undefined : true}
-            onPress={() => update($, view, () => 'files' as const)} />
-          <Button key="tab:changes" label={`${width < 40 ? 'Chg' : 'Changes'} ${list.length}`} plain hotkey="c"
-            dimColor={current === 'changes' ? undefined : true}
-            onPress={() => update($, view, () => 'changes' as const)} />
-          <Button key="tab:history" label={width < 40 ? 'Log' : 'History'} plain hotkey="h"
-            dimColor={current === 'history' ? undefined : true}
-            onPress={() => update($, view, () => 'history' as const)} />
-          <Button key="tab:search" label={width < 40 ? 'Find' : 'Search'} plain hotkey="s"
-            dimColor={current === 'search' ? undefined : true}
-            onPress={() => update($, view, () => 'search' as const)} />
+      {tabRows.map((row, i) => (
+        <Box key={`tabs:${i}`} flexDirection="row" gap={1}>
+          {row.map(one => one.draw())}
         </Box>
-        {/* Always drawn in the split view, dim when the list fits: these sit
-            before the search field, and a control appearing or vanishing there
-            as results change moved the focus off the field mid-typing. */}
-        {rows !== undefined && (
-          <Box flexDirection="row">
-            <Button key="list:up" label="▲" plain dimColor={isOver ? undefined : true}
-              onPress={() => scroll(-Math.max(1, room - 2))} />
-            <Button key="list:down" label="▼" plain dimColor={isOver ? undefined : true}
-              onPress={() => scroll(Math.max(1, room - 2))} />
-          </Box>
-        )}
-      </Box>
+      ))}
       {current === 'changes' && (
         <Box flexDirection="row" gap={1}>
           <Text dimColor>{against.head === undefined ? 'vs' : 'in'}</Text>
@@ -1076,11 +1095,87 @@ async function drawPreview(
   const fileLines = isSource && shown.text !== '' ? shown.text.replace(/\n$/, '').split('\n') : []
   const hunkRows = hunks.map(hunk => hunk.body.replace(/\n$/, '').split('\n').length)
   const total = isSource ? fileLines.length : hunkRows.reduce((sum, n) => sum + n, 0)
-  const hasModes = shown.isChanged || isMarkdown(shown.path)
-  const fixed = 1 + (hasModes ? 1 : 0) + (shown.note !== '' ? 1 : 0)
-  const room = rows === undefined ? total : Math.max(1, rows - fixed)
   const isWrapped = await read($, wrapLines)
   const shift = isWrapped ? 0 : await read($, sideways)
+  const isMd = isMarkdown(shown.path)
+  const lineRoomEstimate = Math.max(10, width - String(Math.max(total, 1)).length * (shown.mode === 'diff' ? 2 : 1) - 6)
+  const canShiftEstimate =
+    !isWrapped &&
+    (shown.mode === 'file' || shown.mode === 'diff') &&
+    widest(isSource ? fileLines : hunks.map(hunk => hunk.body).join('\n').split('\n')) > lineRoomEstimate
+
+  // The toolbar, each Button with the cells it draws in, packed into rows
+  // that fit: a row that overflowed dropped its last Buttons, hotkeys and all.
+  type Tool = { key: string; cells: number; draw: () => RenderElement }
+  const tool = (key: string, label: string, hotkey: string | undefined, draw: () => RenderElement): Tool => ({
+    key,
+    cells: buttonCells(label, hotkey !== undefined),
+    draw,
+  })
+  const tools: Tool[] = []
+  // Placeholders for closures defined once the window is known.
+  const late: { scroll: (by: number) => unknown; slide: (by: number) => unknown; isOver: boolean; room: number; shift: number } = {
+    scroll: () => undefined,
+    slide: () => undefined,
+    isOver: false,
+    room: 1,
+    shift,
+  }
+  if (shown.isOnDisk && isMd) {
+    tools.push(tool('mode:rendered', 'Preview', 'm', () => (
+      <Button key="mode:rendered" label="Preview" plain hotkey="m" dimColor={shown.mode === 'rendered' ? undefined : true}
+        onPress={() => showPath($, shown.path, { mode: 'rendered' })} />
+    )))
+  }
+  if (shown.isOnDisk && (isMd || shown.isChanged)) {
+    const label = isMd ? 'Source' : 'File'
+    tools.push(tool('mode:file', label, 'o', () => (
+      <Button key="mode:file" label={label} plain hotkey="o" dimColor={shown.mode === 'file' ? undefined : true}
+        onPress={() => showPath($, shown.path, { mode: 'file' })} />
+    )))
+  }
+  if (shown.isChanged) {
+    tools.push(tool('mode:diff', 'Diff', 'd', () => (
+      <Button key="mode:diff" label="Diff" plain hotkey="d" dimColor={shown.mode === 'diff' ? undefined : true}
+        onPress={() => showPath($, shown.path, { mode: 'diff' })} />
+    )))
+  }
+  // Always drawn, dim when there is nowhere to go, so the toolbar's
+  // Buttons never shift under the focus as the content changes.
+  tools.push(tool('up', '▲', 'k', () => (
+    <Button key="up" label="▲" plain hotkey="k" dimColor={late.isOver ? undefined : true}
+      onPress={() => late.scroll(-Math.max(1, Math.floor(late.room / 2)))} />
+  )))
+  tools.push(tool('down', '▼', 'j', () => (
+    <Button key="down" label="▼" plain hotkey="j" dimColor={late.isOver ? undefined : true}
+      onPress={() => late.scroll(Math.max(1, Math.floor(late.room / 2)))} />
+  )))
+  if (list.length > 0) {
+    tools.push(tool('prev', '‹', 'p', () => <Button key="prev" label="‹" plain hotkey="p" onPress={() => step(-1)} />))
+    tools.push(tool('next', '›', 'n', () => <Button key="next" label="›" plain hotkey="n" onPress={() => step(1)} />))
+  }
+  tools.push(tool('wrap', '↩', 'w', () => (
+    <Button key="wrap" label="↩" plain hotkey="w" dimColor={isWrapped ? undefined : true}
+      onPress={() => update($, wrapLines, now => !now)} />
+  )))
+  if (canShiftEstimate) {
+    tools.push(tool('left', '◀', undefined, () => (
+      <Button key="left" label="◀" plain dimColor={late.shift === 0 ? true : undefined} onPress={() => late.slide(-1)} />
+    )))
+    tools.push(tool('right', '▶', undefined, () => <Button key="right" label="▶" plain onPress={() => late.slide(1)} />))
+  }
+  tools.push(tool('quote', '❝', 'q', () => <Button key="quote" label="❝" plain hotkey="q" onPress={() => quoteSelection($, shown.path)} />))
+  tools.push(tool('ref', '#', 'r', () => <Button key="ref" label="#" plain hotkey="r" onPress={() => referenceLines($, shown)} />))
+  if (isOwnPane) {
+    tools.push(tool('mention', '@', undefined, () => <Button key="mention" label="@" plain onPress={() => mention($, shown.path)} />))
+    tools.push(tool('close', '✕', undefined, () => (
+      <Button key="close" label="✕" plain role="dismiss" onPress={() => $.ui.close({ id: PREVIEW })} />
+    )))
+  }
+  const toolRows = packRows(tools, Math.max(8, width - 1))
+  const hasStatus = shown.isChanged || total > 0
+  const fixed = 1 + toolRows.length + (hasStatus ? 1 : 0) + (shown.note !== '' ? 1 : 0)
+  const room = rows === undefined ? total : Math.max(1, rows - fixed)
 
   // The rows each unit takes: a line wrapped into the room beside its gutter
   // (line numbers; a diff's two plus its marker), a hunk label one.
@@ -1108,10 +1203,13 @@ async function drawPreview(
     update($, previewOffset, now => clamp(Math.min(now, layout.previewLast) + by, 0, layout.previewLast))
   const isOver = last > 0
   const widestLine = !isWrapped && isCounted ? widest(isSource ? fileLines : hunks.map(hunk => hunk.body).join('\n').split('\n')) : 0
-  const canShift = !isWrapped && widestLine > lineRoom
   const sidewaysStep = Math.max(8, Math.floor(lineRoom / 2))
   const slide = (by: number) =>
-    update($, sideways, now => clamp(now + by, 0, Math.max(0, widestLine - lineRoom + 2)))
+    update($, sideways, now => clamp(now + by * sidewaysStep, 0, Math.max(0, widestLine - lineRoom + 2)))
+  late.scroll = scroll
+  late.slide = slide
+  late.isOver = isOver
+  late.room = room
 
   const body: RenderElement[] = []
   let shownEnd = Math.min(total, offset + count)
@@ -1245,53 +1343,27 @@ async function drawPreview(
 
   return (
     <Box flexDirection="column" flexGrow={1}>
-      <Box flexDirection="row" justifyContent="space-between">
-        <Text bold>
-          {layout.icons === 'ascii' ? '' : iconFor(baseName(shown.path), false, false, layout.icons).glyph}
-          {fit(shown.path, width - 19)}
+      <Text bold>
+        {layout.icons === 'ascii' ? '' : iconFor(baseName(shown.path), false, false, layout.icons).glyph}
+        {fit(shown.path, Math.max(4, width - 4))}
+      </Text>
+      {toolRows.map((row, i) => (
+        <Box key={`tools:${i}`} flexDirection="row" gap={1}>
+          {row.map(one => one.draw())}
+        </Box>
+      ))}
+      {hasStatus && (
+        <Text dimColor>
+          {change !== undefined && <Text color={BADGE_COLOR[change.letter] ?? 'yellow'}>{change.letter}</Text>}
+          {fit(
+            [
+              change !== undefined ? ` ${verb} ${against.label} · ${at + 1}/${list.length}` : '',
+              total > 0 ? `${change !== undefined ? ' ·' : ''} ${shown.mode === 'diff' ? 'rows' : 'lines'} ${offset + 1}-${shownEnd}/${total}` : '',
+            ].join(''),
+            Math.max(4, width - 3),
+          )}
         </Text>
-        <Box flexDirection="row" gap={1}>
-          <Button key="wrap" label="↩" plain hotkey="w" dimColor={isWrapped ? undefined : true}
-            onPress={() => update($, wrapLines, now => !now)} />
-          {canShift && <Button key="left" label="◀" plain dimColor={shift === 0 ? true : undefined} onPress={() => slide(-sidewaysStep)} />}
-          {canShift && <Button key="right" label="▶" plain onPress={() => slide(sidewaysStep)} />}
-          {isOver && <Button key="up" label="▲" plain hotkey="k" onPress={() => scroll(-Math.max(1, Math.floor(room / 2)))} />}
-          {isOver && <Button key="down" label="▼" plain hotkey="j" onPress={() => scroll(Math.max(1, Math.floor(room / 2)))} />}
-          {list.length > 0 && <Button key="prev" label="‹" plain hotkey="p" onPress={() => step(-1)} />}
-          {list.length > 0 && <Button key="next" label="›" plain hotkey="n" onPress={() => step(1)} />}
-          <Button key="quote" label="❝" plain hotkey="q" onPress={() => quoteSelection($, shown.path)} />
-          <Button key="ref" label="#" plain hotkey="r" onPress={() => referenceLines($, shown)} />
-          {isOwnPane && <Button key="mention" label="@" plain onPress={() => mention($, shown.path)} />}
-          {isOwnPane && (
-            <Button key="close" label="✕" plain role="dismiss" onPress={() => $.ui.close({ id: PREVIEW })} />
-          )}
-        </Box>
-      </Box>
-      {hasModes && (
-        <Box flexDirection="row" gap={1}>
-          {shown.isOnDisk && isMarkdown(shown.path) && (
-            <Button key="mode:rendered" label="Preview" plain hotkey="m" dimColor={shown.mode === 'rendered' ? undefined : true}
-              onPress={() => showPath($, shown.path, { mode: 'rendered' })} />
-          )}
-          {shown.isOnDisk && (
-            <Button key="mode:file" label={isMarkdown(shown.path) ? 'Source' : 'File'} plain hotkey="o"
-              dimColor={shown.mode === 'file' ? undefined : true}
-              onPress={() => showPath($, shown.path, { mode: 'file' })} />
-          )}
-          {shown.isChanged && (
-            <Button key="mode:diff" label="Diff" plain hotkey="d" dimColor={shown.mode === 'diff' ? undefined : true}
-              onPress={() => showPath($, shown.path, { mode: 'diff' })} />
-          )}
-          {change !== undefined && (
-            <Text dimColor>
-              <Text color={BADGE_COLOR[change.letter] ?? 'yellow'}>{change.letter}</Text>
-              {` ${verb} ${fit(against.label, width - 30)} · ${at + 1}/${list.length}`}
-            </Text>
-          )}
-          {isOver && <Text dimColor>{` ${offset + 1}-${shownEnd}/${total}`}</Text>}
-        </Box>
       )}
-      {!hasModes && isOver && <Text dimColor>{`lines ${offset + 1}-${shownEnd} of ${total}`}</Text>}
       {shown.note !== '' && <Text dimColor>{shown.note}</Text>}
       {body}
     </Box>
