@@ -22,6 +22,7 @@ import { formatAge, formatSize, isIgnored, parseIgnored } from './details'
 import { hasOutline, outlineOf } from './outline'
 import { isDelimited, isJson, isJsonLines, jsonRows, parseDelimited, parseJson, parseJsonLines, tableLines } from './data'
 import type { JsonNode, JsonRow } from './data'
+import { decodeBase64, imageCells, imageFormatOf, imageInfo } from './image'
 import type { OutlineEntry, OutlineKind } from './outline'
 import type { HelpLanguage } from './help'
 import { buttonCells, fitCount, lastStart, packRows, rowsOf, shiftCells, widest } from './wrap'
@@ -35,6 +36,10 @@ const EDITING_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit'])
 const MAX_ROWS = 1500
 const MAX_PREVIEW_BYTES = 512 * 1024
 const MAX_CODE_CHARS = 10000
+// Pictures: drawn up to this size; headers read from files `fs.read` takes.
+const MAX_IMAGE_BYTES = 32 * 1024 * 1024
+const MAX_READ_BYTES = 4 * 1024 * 1024
+const IMAGE_HEADER_BYTES = 256 * 1024
 const MAX_COMMITS = 100
 // The explorer splits into a sidebar and a preview from this many columns.
 const SPLIT_MIN_COLUMNS = 80
@@ -633,6 +638,16 @@ async function fileText($: EngineInterface, rel: string, _size?: number) {
   }
   const bytes = stat.size
   const facts = { size: bytes, mtimeMs: stat.mtimeMs }
+  // A picture is not text: its header says what it is, and the terminal
+  // reads the file itself to draw it.
+  const named = imageFormatOf(rel)
+  if (named !== undefined && stat.kind === 'file') {
+    if (bytes > MAX_IMAGE_BYTES) return { text: '', note: `${Math.round(bytes / 1024)} KiB: too large to preview`, isOnDisk: true, ...facts }
+    const head = bytes <= MAX_READ_BYTES ? await $.fs.read(join(dir, rel), { as: 'bytes' }).catch(() => undefined) : undefined
+    const info = typeof head?.base64 === 'string' ? imageInfo(decodeBase64(head.base64, IMAGE_HEADER_BYTES)) : undefined
+    const image = { format: info?.format ?? named, width: info?.width ?? 0, height: info?.height ?? 0, file: real }
+    return { text: '', note: '', isOnDisk: true, image, ...facts }
+  }
   if (bytes > MAX_PREVIEW_BYTES) {
     return { text: '', note: `${Math.round(bytes / 1024)} KiB: too large to preview`, isOnDisk: true, ...facts }
   }
@@ -676,6 +691,7 @@ async function showPath($: EngineInterface, rel: string, options: { mode?: Explo
     isOnDisk: file.isOnDisk,
     size: (file as { size?: number }).size,
     mtimeMs: (file as { mtimeMs?: number }).mtimeMs,
+    image: (file as { image?: ExplorerPreview['image'] }).image,
   }
   const before = await read($, preview)
   if (before === null || before.path !== rel || before.mode !== mode) {
@@ -1463,6 +1479,7 @@ async function drawPreview(
   width: number,
   rows: number | undefined,
   isOwnPane: boolean,
+  surface: RenderSurface,
 ): Promise<RenderElement> {
   const { Box, Text, Button, Code, Markdown } = els
   const shown = await read($, preview)
@@ -1611,6 +1628,7 @@ async function drawPreview(
   const toolRows = packRows(tools, Math.max(8, width - 1))
   const hasStatus = shown.isChanged || total > 0 || shown.size !== undefined
   const nowMs = await clockNow($)
+  const ageText = shown.mtimeMs === undefined ? '' : formatAge(shown.mtimeMs, nowMs)
   const fixed = 1 + toolRows.length + (hasStatus ? 1 : 0) + (shown.note !== '' ? 1 : 0) + (pick !== '' ? 1 : 0)
   const room = rows === undefined ? total : Math.max(1, rows - fixed)
 
@@ -1771,6 +1789,41 @@ async function drawPreview(
     }
     if (nodes.length >= MAX_DATA_ROWS && offset + count >= total) body.push(<Text dimColor>(first {MAX_DATA_ROWS} rows; fold some to see more)</Text>)
   }
+  // Pictures: PNG drawn where the surface has Image (the terminal, in
+  // kitty or Ghostty; its alt text elsewhere), the rest named with their size.
+  const picture = shown.mode === 'file' ? shown.image : undefined
+  if (picture !== undefined) {
+    // Only the terminal's table has Image; another surface's has none to draw.
+    const Image = surface === 'terminal' ? (els as ElementTable<'terminal'>).Image : undefined
+    const dims = picture.width > 0 ? ` ${picture.width}×${picture.height}` : ''
+    const kind = picture.format.toUpperCase()
+    if (picture.format === 'png' && Image !== undefined) {
+      const box = imageCells(picture.width, picture.height, width - 1, rows === undefined ? 40 : room)
+      body.push(
+        <Image
+          key="picture"
+          source={{ file: picture.file, format: 'png', generation: Math.round(shown.mtimeMs ?? 0) }}
+          columns={box.columns}
+          rows={box.rows}
+          alt={`${kind} image${dims} (pictures show in kitty and Ghostty)`}
+        />,
+      )
+    } else {
+      body.push(<Text>{`${kind} image${dims}`}</Text>)
+      body.push(
+        <Text dimColor>
+          {picture.format !== 'png'
+            ? 'Only PNG is drawn; open it in a viewer to see it.'
+            : 'Pictures are drawn in the terminal (kitty, Ghostty).'}
+        </Text>,
+      )
+    }
+  }
+  // SVG is source, drawn above it where the surface has Svg.
+  if (shown.mode === 'file' && /\.svg$/i.test(shown.path) && shown.text !== '' && shown.note === '' && offset === 0) {
+    const Svg = surface === 'terminal' ? undefined : (els as ElementTable<'desktop'>).Svg
+    if (Svg !== undefined) body.push(<Svg key="svg" source={shown.text} alt={baseName(shown.path)} />)
+  }
   if (shown.mode === 'file' && fileLines.length > 0 && blameOf !== undefined) {
     // A run of lines from one commit is labelled once, at its top.
     const nowMs = await clockNow($)
@@ -1878,7 +1931,7 @@ async function drawPreview(
             [
               change !== undefined ? ` ${verb} ${against.label} · ${at + 1}/${list.length}` : '',
               total > 0 ? `${change !== undefined ? ' ·' : ''} ${shown.mode === 'diff' || shown.mode === 'data' ? 'rows' : 'lines'} ${offset + 1}-${shownEnd}/${total}` : '',
-              shown.size !== undefined ? ` · ${formatSize(shown.size)}${shown.mtimeMs ? ` · ${formatAge(shown.mtimeMs, nowMs)} ago` : ''}` : '',
+              shown.size !== undefined ? ` · ${formatSize(shown.size)}${ageText === '' ? '' : ` · ${ageText} ago`}` : '',
             ].join(''),
             Math.max(4, width - 3),
           )}
@@ -2048,12 +2101,12 @@ export const register: Register = (on, options) => {
         <Box width={1} marginRight={1}>
           <Text dimColor>{Array.from({ length: rows }, () => '│').join('\n')}</Text>
         </Box>
-        {await drawPreview($, els, width - sidebar - 2, rows, false)}
+        {await drawPreview($, els, width - sidebar - 2, rows, false, e.surface)}
       </Box>
     )
   })
 
   on('ui.render', { component: 'Pane', requestId: PREVIEW }, async ($, e) => {
-    return drawPreview($, $.ui.resolve(e), Math.max(20, e.props.bodyColumns), undefined, true)
+    return drawPreview($, $.ui.resolve(e), Math.max(20, e.props.bodyColumns), undefined, true, e.surface)
   })
 }

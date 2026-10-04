@@ -50,6 +50,10 @@ The open file's functions, classes and types (TypeScript, JavaScript, Python, Go
 
 CSV and TSV open as a table (\`◀\` \`▶\` scroll wide ones sideways); JSON and JSON Lines as a tree. Press a key in the tree to fold or unfold it and pick it: its path (\`a.b[3].c\`) shows above the tree, and \`r\` inserts \`@file (a.b[3].c)\`. Invalid JSON says where it breaks.
 
+## Pictures
+
+PNG files are drawn in the preview where the terminal can show pictures (kitty, Ghostty); elsewhere, and for JPEG, GIF and WebP, the preview names the format and size. SVG opens as its source, drawn above it in the desktop and VS Code apps.
+
 ## Commands
 
 | Command | Does |
@@ -112,6 +116,10 @@ export const HELP_JA = `# キーとコマンド
 ## データファイル
 
 CSV と TSV は表で開きます（幅が広いときは \`◀\` \`▶\` で横スクロール）。JSON と JSON Lines はツリーで開きます。ツリーのキーを押すと折りたたみ・展開してその要素を選び、パス（\`a.b[3].c\`）がツリーの上に出ます。続けて \`r\` で \`@file (a.b[3].c)\` を入れます。壊れた JSON はどこで壊れているかを表示します。
+
+## 画像
+
+PNG は画像を表示できるターミナル（kitty、Ghostty）ならプレビューに描画します。それ以外の環境や JPEG・GIF・WebP では、形式とサイズを表示します。SVG はソースで開き、デスクトップと VS Code ではその上に描画します。
 
 ## コマンド
 
