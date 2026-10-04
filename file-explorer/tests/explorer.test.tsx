@@ -1376,3 +1376,100 @@ test('previews pictures on every surface: drawn where it can be, named elsewhere
   }
   expect(reads.some(path => path.endsWith('away.png'))).toBe(false)
 })
+
+const MERMAID_DOC = ['# Flow', '', '```mermaid', 'graph TD', '  A --> B', '```', '', '```mermaid', 'graph TD', '  A -->', '```', ''].join('\n')
+
+type TestOn = Parameters<Extract<Parameters<typeof test>[1], (...args: never[]) => unknown>>[1]
+
+function mermaidHooks(on: TestOn, runs: { argv: string[]; stdin?: string }[], hasMmdc: boolean) {
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('env.get', async (_$, e) => ({ value: e.name === 'HOME' ? '/home/me' : undefined }))
+  on('fs.stat', async (_$, e) => STAT(e.path))
+  on('fs.list', async (_$, e) => ({
+    value: (e.path === ROOT ? [{ name: 'README.md', kind: 'file' as const, size: 100 }] : []).map(one => ({ ...one, mtimeMs: 0, isLink: false })),
+  }))
+  on('fs.exists', async () => ({ value: false }))
+  on('fs.read', async (_$, e) => {
+    if (e.path.endsWith('.png')) return { value: { base64: 'iVBORw0KGgoAAAANSUhEUgAAAoAAAAHgCAYAAAA=' } }
+    if (e.path.endsWith('.svg')) return { value: '<svg xmlns="http://www.w3.org/2000/svg"><text>A</text></svg>' }
+    return { value: MERMAID_DOC }
+  })
+  on('process.run', async (_$, e) => {
+    if (e.argv[0] === 'git') return fakeGit(e.argv, [])
+    runs.push({ argv: [...e.argv], stdin: e.init?.stdin })
+    if (e.argv[0] === 'mmdc' && !hasMmdc) throw new Error('spawn mmdc ENOENT')
+    if (e.argv[1] === '--version') return ok('12.0.0\n')
+    if (e.argv[0] === 'mmdc' && (e.init?.stdin ?? '').includes('A -->\n') === false && (e.init?.stdin ?? '').endsWith('A -->')) {
+      return { value: { exitCode: 1, stdout: '', stderr: "Error: Parse error on line 2:\nExpecting 'NODE_STRING', got 'EOF'\n    at x (y)", isStdoutTruncated: false, isStderrTruncated: false } }
+    }
+    return ok('')
+  })
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+  on('ui.panes', async () => ({ value: [] }))
+}
+
+test("draws mermaid blocks with the person's own mmdc, a picture in the terminal and SVG in the apps", async ($, on) => {
+  const runs: { argv: string[]; stdin?: string }[] = []
+  const clock = mock.clock(on)
+  mermaidHooks(on, runs, true)
+
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE('file-explorer', 120))
+  await ui.press({ key: 'row:README.md' })
+  await clock.settle()
+
+  // Asked once whether mmdc is there; the cache made private under HOME.
+  expect(runs.filter(run => run.argv.join(' ') === 'mmdc --version')).toHaveLength(1)
+  const mkdir = runs.find(run => run.argv[0] === 'node')
+  expect(mkdir?.argv.at(-1)).toBe('/home/me/.cache/claude-file-explorer/mermaid')
+  expect(mkdir?.argv[2]).toContain('0o700')
+  // Each diagram goes in on stdin, never as a file in the project.
+  const draws = runs.filter(run => run.argv[0] === 'mmdc' && run.argv.includes('--input'))
+  expect(draws[0]?.stdin).toBe('graph TD\n  A --> B')
+  expect(draws[0]?.argv).toContain('-')
+  expect(draws.every(run => String(run.argv[run.argv.indexOf('--output') + 1]).startsWith('/home/me/.cache/'))).toBe(true)
+
+  // The good one is a picture; the broken one says why, its source kept.
+  const image = await ui.find({ type: 'Image' })
+  expect(String((image?.props.source as { file: string }).file)).toMatch(/^\/home\/me\/\.cache\/claude-file-explorer\/mermaid\/[0-9a-f]+\.png$/)
+  expect(await ui.find({ type: 'Text', text: "mmdc: Parse error on line 2: Expecting 'NODE_STRING', got 'EOF'" })).toBeDefined()
+  expect(String((await ui.find({ type: 'Code' }))?.props.source)).toContain('A -->')
+
+  // The desktop app draws the SVG.
+  await ui.unmount()
+  const app = await $.ui.mount({ ...PANE('file-explorer', 120), surface: 'desktop' })
+  expect(String((await app.find({ type: 'Svg' }))?.props.source)).toContain('<svg')
+  expect(await app.find({ type: 'Image' })).toBeUndefined()
+
+  // Opening it again draws nothing new.
+  const before = runs.length
+  await app.press({ key: 'row:README.md' })
+  await clock.settle()
+  expect(runs.length).toBe(before)
+})
+
+test('without mmdc, says how to get it and runs nothing more', async ($, on) => {
+  const runs: { argv: string[]; stdin?: string }[] = []
+  const clock = mock.clock(on)
+  mermaidHooks(on, runs, false)
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE('file-explorer', 120))
+  await ui.press({ key: 'row:README.md' })
+  await clock.settle()
+  expect(runs.map(run => run.argv.join(' '))).toEqual(['mmdc --version'])
+  expect(await ui.find({ type: 'Text', text: 'Install mermaid-cli (npm i -g @mermaid-js/mermaid-cli) to draw diagrams.' })).toBeDefined()
+  expect(await ui.find({ type: 'Image' })).toBeUndefined()
+})
+
+test('with mermaid off, never runs mmdc', { options: { mermaid: 'off' } }, async ($, on) => {
+  const runs: { argv: string[]; stdin?: string }[] = []
+  const clock = mock.clock(on)
+  mermaidHooks(on, runs, true)
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE('file-explorer', 120))
+  await ui.press({ key: 'row:README.md' })
+  await clock.settle()
+  expect(runs).toEqual([])
+  expect(await ui.find({ text: /mermaid-cli/ })).toBeUndefined()
+})

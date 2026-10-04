@@ -5,6 +5,7 @@ import type {
   ExplorerBase,
   ExplorerChange,
   ExplorerCommit,
+  ExplorerDiagram,
   ExplorerEntry,
   ExplorerMode,
   ExplorerHit,
@@ -23,6 +24,7 @@ import { hasOutline, outlineOf } from './outline'
 import { isDelimited, isJson, isJsonLines, jsonRows, parseDelimited, parseJson, parseJsonLines, tableLines } from './data'
 import type { JsonNode, JsonRow } from './data'
 import { decodeBase64, imageCells, imageFormatOf, imageInfo } from './image'
+import { cacheFolder, diagramKey, isMermaid, MAX_DIAGRAM_CHARS, mmdcArgs, mmdcError } from './mermaid'
 import type { OutlineEntry, OutlineKind } from './outline'
 import type { HelpLanguage } from './help'
 import { buttonCells, fitCount, lastStart, packRows, rowsOf, shiftCells, widest } from './wrap'
@@ -78,6 +80,8 @@ const pins = atom({ plugin: 'file-explorer', key: 'pins' } as const, [])
 const historyOf = atom({ plugin: 'file-explorer', key: 'historyOf' } as const, '')
 const fileHistory = atom({ plugin: 'file-explorer', key: 'fileHistory' } as const, [])
 const blame = atom({ plugin: 'file-explorer', key: 'blame' } as const, null)
+const diagrams = atom({ plugin: 'file-explorer', key: 'diagrams' } as const, {})
+const mermaidTool = atom({ plugin: 'file-explorer', key: 'mermaidTool' } as const, 'unknown')
 const symbol = atom({ plugin: 'file-explorer', key: 'symbol' } as const, null)
 const dataView = atom({ plugin: 'file-explorer', key: 'dataView' } as const, { path: '', toggled: [], pick: '' })
 const listOffset = atom({ plugin: 'file-explorer', key: 'listOffset' } as const, 0)
@@ -102,7 +106,7 @@ const cache: {
 } = {}
 
 // What the explorer was last drawn as, so presses know where a file shows.
-const layout = { isSplit: false, sidebarColumns: 0, listRows: 20, previewRows: 20, listTotal: 0, previewTotal: 0, previewLast: 0, icons: 'emoji' as IconStyle, language: 'en' as HelpLanguage, visible: { start: 0, end: 0 } }
+const layout = { isSplit: false, sidebarColumns: 0, listRows: 20, previewRows: 20, listTotal: 0, previewTotal: 0, previewLast: 0, icons: 'emoji' as IconStyle, language: 'en' as HelpLanguage, visible: { start: 0, end: 0 }, mermaid: 'auto' as 'auto' | 'off' }
 
 // VS Code's decoration colours, by the letter drawn at the row's end.
 const BADGE_COLOR: Record<string, string> = {
@@ -623,6 +627,89 @@ const JSON_COLOR: Record<string, string | undefined> = {
   error: 'red',
 }
 
+const MAX_DIAGRAMS = 20
+const MAX_SVG_CHARS = 131072
+
+// The mermaid blocks of a markdown text, as splitMarkdown reads them.
+function mermaidSources(text: string): string[] {
+  return splitMarkdown(text)
+    .flatMap(part => (part.kind === 'code' && isMermaid(part.language) ? [part.text] : []))
+    .filter(source => source.trim() !== '' && source.length <= MAX_DIAGRAM_CHARS)
+    .slice(0, MAX_DIAGRAMS)
+}
+
+// Whether the person has mmdc: asked once, again after a refresh.
+async function hasMmdc($: EngineInterface): Promise<boolean> {
+  const known = await read($, mermaidTool)
+  if (known !== 'unknown') return known === 'yes'
+  const ran = await $.process.run(['mmdc', '--version'], { timeoutMs: 20000 }).catch(() => undefined)
+  const isThere = ran !== undefined && ran.exitCode === 0
+  await update($, mermaidTool, () => (isThere ? 'yes' : 'no'))
+  return isThere
+}
+
+// The person's own cache folder for drawings, made private (0700) by node,
+// which mmdc needs anyway: never a shared temp another user could seed.
+async function diagramFolder($: EngineInterface): Promise<string | undefined> {
+  const folder = cacheFolder({
+    xdg: await $.env.get('XDG_CACHE_HOME'),
+    home: (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE')),
+    localAppData: await $.env.get('LOCALAPPDATA'),
+  })
+  if (folder === undefined) return undefined
+  const made = await $.process
+    .run(['node', '-e', "require('fs').mkdirSync(process.argv[1], { recursive: true, mode: 0o700 })", folder], { timeoutMs: 10000 })
+    .catch(() => undefined)
+  return made?.exitCode === 0 ? folder : undefined
+}
+
+// Draws the shown markdown's mermaid blocks with mmdc, one after another, a
+// PNG for the terminal and an SVG for the apps, kept by content.
+async function drawDiagrams($: EngineInterface) {
+  if (layout.mermaid === 'off') return
+  const shown = await read($, preview)
+  if (shown === null || shown.mode !== 'rendered') return
+  const known = await read($, diagrams)
+  const sources = mermaidSources(shown.text).filter(source => known[diagramKey(source)] === undefined)
+  if (sources.length === 0 || !(await hasMmdc($))) return
+  const folder = await diagramFolder($)
+  for (const source of sources) {
+    const key = diagramKey(source)
+    if ((await read($, diagrams))[key] !== undefined) continue
+    if (folder === undefined) {
+      await update($, diagrams, all => ({ ...all, [key]: { status: 'error' as const, error: 'No cache folder for drawings (HOME is unset).' } }))
+      continue
+    }
+    await update($, diagrams, all => ({ ...all, [key]: { status: 'drawing' as const } }))
+    const drawn = await drawOne($, folder, key, source)
+    await update($, diagrams, all => ({ ...all, [key]: drawn }))
+  }
+}
+
+async function drawOne($: EngineInterface, folder: string, key: string, source: string): Promise<ExplorerDiagram> {
+  const png = `${folder}/${key}.png`
+  const svg = `${folder}/${key}.svg`
+  const make = async (output: string, format: 'png' | 'svg') => {
+    if (await $.fs.exists(output).catch(() => false)) return undefined
+    const ran = await $.process.run(mmdcArgs(output, format), { stdin: source, timeoutMs: 60000 }).catch(() => undefined)
+    if (ran === undefined) return 'mmdc did not finish.'
+    return ran.exitCode === 0 ? undefined : mmdcError(ran.stderr)
+  }
+  const failed = await make(png, 'png')
+  if (failed !== undefined) return { status: 'error', error: failed }
+  const head = await $.fs.read(png, { as: 'bytes' }).catch(() => undefined)
+  const info = typeof head?.base64 === 'string' ? imageInfo(decodeBase64(head.base64, 64)) : undefined
+  // The SVG is for the apps; a diagram without one still shows in the terminal.
+  const vector = (await make(svg, 'svg')) === undefined ? await $.fs.read(svg).catch(() => undefined) : undefined
+  return {
+    status: 'ok',
+    png,
+    width: info?.width ?? 0,
+    height: info?.height ?? 0,
+    svg: vector !== undefined && vector.length <= MAX_SVG_CHARS && vector.trimStart().startsWith('<svg') ? vector : undefined,
+  }
+}
+
 // ---- preview -------------------------------------------------------------
 
 async function fileText($: EngineInterface, rel: string, _size?: number) {
@@ -699,6 +786,9 @@ async function showPath($: EngineInterface, rel: string, options: { mode?: Explo
     await update($, sideways, () => 0)
   }
   await update($, preview, () => shown)
+  if (mode === 'rendered' && layout.mermaid === 'auto' && /^\s*(`{3,}|~{3,})\s*(mermaid|mmd)\b/im.test(shown.text)) {
+    $.clock.after(0, () => void drawDiagrams($).catch(() => undefined))
+  }
   await reveal($, rel)
   if (!layout.isSplit) await $.ui.open({ id: PREVIEW, title: baseName(rel) })
 }
@@ -852,6 +942,9 @@ async function refreshAll($: EngineInterface) {
   await loadChanges($)
   await loadIgnored($)
   await loadHistory($)
+  // A newly installed mmdc is found, and failed diagrams are tried again.
+  await update($, mermaidTool, () => 'unknown')
+  await update($, diagrams, all => Object.fromEntries(Object.entries(all).filter(([, one]) => one.status === 'ok')))
   const narrowed = await read($, historyOf)
   if (narrowed !== '') await loadFileLog($, narrowed)
   await reloadPreview($)
@@ -1679,7 +1772,36 @@ async function drawPreview(
     // Headings drawn by hand, since a terminal has one size of type: H1 a
     // full-width band, H2 a coloured title over a rule, H3 a marked title.
     // Fenced code is framed, its language set into the top edge.
+    const drawings = await read($, diagrams)
+    const tool = await read($, mermaidTool)
+    const { Image } = surface === 'terminal' ? (els as ElementTable<'terminal'>) : { Image: undefined }
+    const Svg = surface === 'terminal' ? undefined : (els as ElementTable<'desktop'>).Svg
+    let hasHinted = false
     splitMarkdown(part.text).forEach((piece, i) => {
+      // A mermaid block mmdc drew: the picture in place of its source.
+      const drawn = piece.kind === 'code' && isMermaid(piece.language) && layout.mermaid === 'auto' ? drawings[diagramKey(piece.text)] : undefined
+      if (drawn?.status === 'ok') {
+        if (Image !== undefined && drawn.png !== undefined) {
+          const box = imageCells(drawn.width ?? 0, drawn.height ?? 0, width - 1, rows === undefined ? 40 : room)
+          body.push(
+            <Image key={`diagram:${i}`} source={{ file: drawn.png, format: 'png' }} columns={box.columns} rows={box.rows}
+              alt="Mermaid diagram (pictures show in kitty and Ghostty; o for the source)" />,
+          )
+          return
+        }
+        if (Svg !== undefined && drawn.svg !== undefined) {
+          body.push(<Svg key={`diagram:${i}`} source={drawn.svg} alt="Mermaid diagram" />)
+          return
+        }
+      }
+      if (piece.kind === 'code' && isMermaid(piece.language) && layout.mermaid === 'auto') {
+        if (drawn?.status === 'drawing') body.push(<Text key={`diagram-note:${i}`} dimColor>Drawing the diagram with mmdc…</Text>)
+        else if (drawn?.status === 'error') body.push(<Text key={`diagram-note:${i}`} color="red">{fit(`mmdc: ${drawn.error ?? 'failed'}`, Math.max(8, width - 2))}</Text>)
+        else if (tool === 'no' && !hasHinted) {
+          hasHinted = true
+          body.push(<Text key={`diagram-note:${i}`} dimColor>Install mermaid-cli (npm i -g @mermaid-js/mermaid-cli) to draw diagrams.</Text>)
+        }
+      }
       if (piece.kind === 'code') {
         body.push(
           <Box key={`code:${i}`} borderStyle="round" borderColor="gray" paddingX={1} width={Math.max(8, width - 1)}>
@@ -1948,6 +2070,7 @@ export const register: Register = (on, options) => {
   const style = options.icons
   layout.icons = style === 'nerd' || style === 'ascii' ? style : 'emoji'
   layout.language = options.language === 'ja' ? 'ja' : 'en'
+  layout.mermaid = options.mermaid === 'off' ? 'off' : 'auto'
   let pending: { cancel: () => void } | undefined
 
   on('session.start', async ($, e, next) => {
