@@ -41,13 +41,14 @@ claude --plugin-dir ./file-explorer
 ## file-explorer
 
 - `/quote` quotes the mouse selection into the prompt (from the preview, with its file and lines); `/ref` inserts `@file (lines a-b)`. A mouse selection leaves the keyboard with the prompt, so these are the keyboard way; `q`/`r` work once the pane has the keys (`ctrl+x tab`)
-- `/files [files|changes|history|search]` opens the explorer; `/changes [ref | a..b | a...b]` opens the changes view; `/search [text]` searches file contents
+- `/files [files|changes|history|search|help]` opens the explorer; `/changes [ref | a..b | a...b]` opens the changes view; `/search [text]` searches file contents
 - From 80 columns wide the pane splits: the tree on the left, the open file or diff on the right, each scrolled on its own (the wheel scrolls the column under the pointer). Narrower, the file opens in a pane of its own. `/files` asks the dock for 110 columns; drag it wider or narrower as you like.
 - **Follow** (split view, on by default; `follow` in the sidebar header): when Claude reads a file the preview shows it at the lines read; when Claude edits one it shows the diff at the hunk it changed
 - **Last prompt** base: each prompt you send snapshots the working tree (through an index of the explorer's own under `.git/`, leaving your index and stash alone), and the Changes base cycles HEAD → last prompt → default branch, so you can review just what the latest turn changed; `/changes turn` selects it
 - `#` (`r`) in the preview inserts `@path (lines a-b)`: the lines you selected with the mouse, else the lines in view; `❝` quotes now name the lines too
 - Files and folders carry icons by name and extension (📁 📂 📘 📝 🐍 …); folders also get a blue `▸`/`▾` and a trailing `/`
 - Icon style is the `icons` option in `/config`: `emoji` (default, any terminal), `nerd` (needs a Nerd Font; coloured like VS Code), or `ascii`
+- `i` (`?` in the sidebar) or `/files help` shows every key and command in the preview; `i` again goes back
 - Explorer: `f` Files, `c` Changes, `h` History, `s` Search
 - Search: **Name** filters file names as you type (fuzzy, like quick open; Enter opens the best match); **Text** runs ripgrep on Enter (`git grep` without it), grouped by file with the hit highlighted, `Aa` for case and `.*` for regex; a hit opens its file at that line
 - Markdown files open rendered (`m` Preview, `o` Source): H1 as a full-width band, H2 over a rule, H3 marked, since a terminal has one type size; fenced code in a rounded frame with its language on the top edge; a relative link opens its file in the explorer
