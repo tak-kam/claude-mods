@@ -72,6 +72,7 @@ declare module 'claude-code' {
       follow: boolean
       lastPrompt: ExplorerBase | null
       search: ExplorerSearch
+      pins: string[]
       previewOffset: number
       wrapLines: boolean
       sideways: number

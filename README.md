@@ -54,6 +54,7 @@ claude --plugin-dir ./file-explorer
 - Search: **Name** filters file names as you type (fuzzy, like quick open; Enter opens the best match); **Text** runs ripgrep on Enter (`git grep` without it), grouped by file with the hit highlighted, `Aa` for case and `.*` for regex; a hit opens its file at that line
 - Markdown files open rendered (`m` Preview, `o` Source): H1 as a full-width band, H2 over a rule, H3 marked, since a terminal has one type size; fenced code in a rounded frame with its language on the top edge; a relative link opens its file in the explorer
 - Long lines wrap under the gutter by default; `w` (`↩`) turns wrapping off to cut lines at the edge and scroll sideways with `◀` `▶`
+- `y` copies the open file's path; `b` pins it to the top of the Files tab (pins are kept per project across sessions)
 - Preview: `o` / `d` file or diff, `j` / `k` scroll, `n` / `p` next or previous change, `q` quotes the mouse selection, `❝ quote` quotes a hunk, `@` inserts `@path`
 
 Opened at start, the pane docks beside the transcript in fullscreen mode at 144 columns or wider; `/files` opens it at any width.
