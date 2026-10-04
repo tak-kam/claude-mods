@@ -65,6 +65,46 @@ claude --plugin-dir ./file-explorer
 
 Opened at start, the pane docks beside the transcript in fullscreen mode at 144 columns or wider; `/files` opens it at any width.
 
+### Optional tools
+
+The explorer needs nothing beyond Claude Code. Each tool below, when it is on your `PATH`, turns on more; without it that part falls back and the rest works as before. The explorer never installs any of them.
+
+| Feature | Uses | Without it |
+| --- | --- | --- |
+| Changes, History, blame, ignored files, last-prompt diffs | `git` | Files, preview and search still work; the git views say "Not a git repository" |
+| Search (file names and text) | `rg` (ripgrep) | `git ls-files` and `git grep` (in a git repository) |
+| PNG pictures | a terminal that shows pictures (kitty, Ghostty) | the picture's alt text |
+| JPEG, GIF, WebP | `sips` (built into macOS), else `ffmpeg`, else ImageMagick | the format and pixel size |
+| SVG in the terminal | `rsvg-convert` (librsvg) | the source (the desktop and VS Code apps draw SVG themselves) |
+| Mermaid diagrams | `mmdc` ([mermaid-cli](https://github.com/mermaid-js/mermaid-cli); brings Node.js packages and a headless Chromium) | the block as code |
+
+**macOS** (`sips` is already there for JPEG, GIF and WebP):
+
+```sh
+brew install ripgrep librsvg
+npm i -g @mermaid-js/mermaid-cli
+```
+
+**Linux**, by distribution (`ffmpeg` for JPEG, GIF and WebP; `rsvg-convert` for SVG):
+
+```sh
+# Debian, Ubuntu
+sudo apt install ripgrep ffmpeg librsvg2-bin
+# Fedora (ffmpeg-free from Fedora itself, or ffmpeg from RPM Fusion)
+sudo dnf install ripgrep ffmpeg-free librsvg2-tools
+# Arch
+sudo pacman -S ripgrep ffmpeg librsvg
+# openSUSE
+sudo zypper install ripgrep ffmpeg rsvg-convert
+
+# Mermaid, on any of them (needs Node.js)
+npm i -g @mermaid-js/mermaid-cli
+```
+
+On Linux, the Chromium that mermaid-cli downloads needs the usual desktop libraries (NSS, ATK, GBM and so on); a desktop install has them, a minimal server or container may not, and then `mmdc` fails and the diagram stays code with its error shown. kitty and Ghostty both run on Linux; in other terminals pictures show as their alt text.
+
+The `pictures` and `mermaid` options in `/config` set to `off` never run a converter or `mmdc`, installed or not.
+
 ### Tests
 
 `claude plugin test file-explorer` runs the suite (no account needed): unit tests for the pure helpers in `hooks/` and integration tests that drive the explorer through the engine's test kit on every surface. CI runs it on every push and pull request against the pinned Claude Code version, and against the latest one as an early warning.
