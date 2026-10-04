@@ -15,6 +15,7 @@ import type {
 import { iconFor, iconWidth } from './icons'
 import { compileQuery, excerpt, fuzzyFilter, fuzzyIndex, matchSpan, parseGrep } from './search'
 import { cellWidth, fitCells, splitMarkdown } from './markdown'
+import { cleanText, isPlainRelative, oneLine } from './safe'
 import type { IconStyle } from './icons'
 
 const EXPLORER = 'file-explorer'
@@ -63,7 +64,7 @@ const lastPrompt = atom({ plugin: 'file-explorer', key: 'lastPrompt' } as const,
 const previewOffset = atom({ plugin: 'file-explorer', key: 'previewOffset' } as const, 0)
 
 // The project's file list for name search, read once and dropped on refresh.
-const cache: { files?: string[]; lower?: string[]; turnHead?: string } = {}
+const cache: { files?: string[]; lower?: string[]; turnHead?: string; rootReal?: string } = {}
 
 // What the explorer was last drawn as, so presses know where a file shows.
 const layout = { isSplit: false, sidebarColumns: 0, listRows: 20, previewRows: 20, listTotal: 0, previewTotal: 0, icons: 'emoji' as IconStyle, visible: { start: 0, end: 0 } }
@@ -84,8 +85,11 @@ const join = (dir: string, rel: string) => (rel === '' ? dir : `${dir}/${rel}`)
 const parentOf = (rel: string) => (rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '')
 const baseName = (rel: string) => rel.slice(rel.lastIndexOf('/') + 1)
 
-const fit = (text: string, room: number) =>
-  room <= 1 ? text.slice(0, Math.max(0, room)) : text.length <= room ? text : `${text.slice(0, room - 1)}…`
+// Every label goes through here, so none carries a control character.
+const fit = (raw: string, room: number) => {
+  const text = oneLine(raw)
+  return room <= 1 ? text.slice(0, Math.max(0, room)) : text.length <= room ? text : `${text.slice(0, room - 1)}…`
+}
 
 const sortEntries = (entries: ExplorerEntry[]) =>
   [...entries].sort((a, b) =>
@@ -96,14 +100,16 @@ const sortEntries = (entries: ExplorerEntry[]) =>
       : a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true }),
   )
 
-// Code takes tab and newline as its only control characters.
-const cleanText = (text: string) =>
-  text.replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '')
+// A repository's own config can name programs git runs on a plain status or
+// diff (fsmonitor, external diff, textconv). The explorer runs git unasked,
+// so it turns those off on every call; `--no-ext-diff --no-textconv` ride
+// on the diffs.
+const GIT_SAFETY = ['-c', 'core.fsmonitor=false']
 
 async function git($: EngineInterface, args: string[]) {
   const cwd = await read($, root)
   return $.process
-    .run(['git', ...args], { cwd, timeoutMs: 15000 })
+    .run(['git', ...GIT_SAFETY, ...args], { cwd, timeoutMs: 15000 })
     .catch(() => ({ exitCode: -1, stdout: '', stderr: 'git could not run' }))
 }
 
@@ -185,8 +191,16 @@ async function snapshotTree($: EngineInterface): Promise<string | undefined> {
   const env = { GIT_INDEX_FILE: index }
   const inGit = (args: string[]) =>
     $.process
-      .run(['git', ...args], { cwd: dir, env, timeoutMs: 20000 })
+      .run(['git', ...GIT_SAFETY, ...args], { cwd: dir, env, timeoutMs: 20000 })
       .catch(() => ({ exitCode: -1, stdout: '', stderr: '' }))
+  // `git add` runs clean filters; one the repository's own config defines
+  // (not git-lfs) is a program the snapshot would run unasked, so no snapshot.
+  const filters = await git($, ['config', '--local', '--get-regexp', '^filter\\..*\\.(clean|process)$'])
+  const isForeign = filters.stdout
+    .split('\n')
+    .filter(line => line.trim() !== '')
+    .some(line => !/^\S+\s+git-lfs\s/.test(line))
+  if (isForeign) return undefined
   // Seeded from HEAD once; later snapshots reuse its stat cache and stay fast.
   if (!(await $.fs.exists(index))) {
     const head = await git($, ['rev-parse', '--verify', '-q', 'HEAD'])
@@ -222,7 +236,7 @@ async function loadChanges($: EngineInterface) {
   }
   const head = await baseHead($)
   const range = [await baseRef($), ...(head === undefined ? [] : [head])]
-  const diff = await git($, ['diff', '--relative', '--name-status', '-z', '-M', ...range])
+  const diff = await git($, ['diff', '--no-ext-diff', '--no-textconv', '--relative', '--name-status', '-z', '-M', ...range])
   if (diff.exitCode !== 0) {
     await update($, gitError, () => fit(diff.stderr.trim() || 'git diff failed', 200))
     await update($, changes, () => [])
@@ -280,9 +294,9 @@ async function diffOf($: EngineInterface, change: ExplorerChange): Promise<{ dif
   const head = now.kind === 'turn' ? cache.turnHead : now.head
   const result =
     change.letter === 'U'
-      ? await git($, ['diff', '--no-index', '--no-color', '--', '/dev/null', change.path])
+      ? await git($, ['diff', '--no-ext-diff', '--no-textconv', '--no-index', '--no-color', '--', '/dev/null', change.path])
       : await git($, [
-          'diff', '--relative', '--no-color', '-M', await baseRef($),
+          'diff', '--no-ext-diff', '--no-textconv', '--relative', '--no-color', '-M', await baseRef($),
           ...(head === undefined ? [] : [head]),
           '--',
           ...(change.from === undefined ? [] : [change.from]),
@@ -346,6 +360,11 @@ async function resolveCommit($: EngineInterface, name: string): Promise<string |
 async function chooseBase($: EngineInterface, typed: string) {
   const name = typed.trim()
   if (name === '' || name === 'HEAD') return setBase($, HEAD)
+  // A ref is never an option: refuse what git would read as one.
+  if (name.split(/\.\.\.?/).some(part => part.startsWith('-'))) {
+    $.ui.toast(`Not a ref: ${oneLine(name)}`)
+    return
+  }
   if (name === 'turn' || name === 'prompt') {
     const turn = await read($, lastPrompt)
     if (turn === null) $.ui.toast('No prompt sent yet this session')
@@ -361,12 +380,12 @@ async function chooseBase($: EngineInterface, typed: string) {
       const merge = await git($, ['merge-base', ref, head])
       ref = merge.exitCode === 0 ? merge.stdout.trim() : undefined
     }
-    if (ref === undefined || head === undefined) $.ui.toast(`Unknown range: ${name}`)
+    if (ref === undefined || head === undefined) $.ui.toast(`Unknown range: ${oneLine(name)}`)
     else await setBase($, { ref, head, label: name })
     return
   }
   const found = await git($, ['rev-parse', '--verify', '-q', `${name}^{commit}`])
-  if (found.exitCode !== 0) $.ui.toast(`Unknown ref: ${name}`)
+  if (found.exitCode !== 0) $.ui.toast(`Unknown ref: ${oneLine(name)}`)
   else await setBase($, { ref: found.stdout.trim(), label: name })
 }
 
@@ -376,7 +395,13 @@ function parseLog(raw: string): ExplorerCommit[] {
     .split('\x1e')
     .map(record => record.replace(/^\n/, '').split('\x1f'))
     .filter(fields => fields.length >= 5)
-    .map(([sha = '', short = '', subject = '', author = '', when = '']) => ({ sha, short, subject, author, when }))
+    .map(([sha = '', short = '', subject = '', author = '', when = '']) => ({
+      sha,
+      short: oneLine(short),
+      subject: oneLine(subject),
+      author: oneLine(author),
+      when: oneLine(when),
+    }))
 }
 
 async function loadHistory($: EngineInterface) {
@@ -442,7 +467,7 @@ async function searchText($: EngineInterface, query: string) {
   if (result.exitCode !== 0 && result.exitCode !== 1) {
     tool = 'git grep'
     result = await git($, [
-      'grep', '-z', '-n', '--column', '-I', '--untracked',
+      'grep', '--no-textconv', '-z', '-n', '--column', '-I', '--untracked',
       ...(now.isCaseSensitive ? [] : ['-i']), now.isRegex ? '-E' : '-F', '-e', query,
     ])
   }
@@ -474,10 +499,18 @@ async function openHit($: EngineInterface, hit: ExplorerHit) {
 
 // ---- preview -------------------------------------------------------------
 
-async function fileText($: EngineInterface, rel: string, size: number | undefined) {
+async function fileText($: EngineInterface, rel: string, _size?: number) {
   const dir = await read($, root)
-  const bytes = size ?? (await $.fs.stat(join(dir, rel)).catch(() => undefined))?.size
-  if (bytes === undefined) return { text: '', note: 'not on disk', isOnDisk: false }
+  // Where the path really lands: a link out of the project (to ~/.ssh, say)
+  // is named, never read into the pane.
+  const stat = await $.fs.stat(join(dir, rel), { resolve: true }).catch(() => undefined)
+  if (stat === undefined) return { text: '', note: 'not on disk', isOnDisk: false }
+  cache.rootReal ??= (await $.fs.stat(dir, { resolve: true }).catch(() => undefined))?.realPath ?? dir
+  const real = stat.realPath ?? ''
+  if (real !== cache.rootReal && !real.startsWith(`${cache.rootReal}/`)) {
+    return { text: '', note: `links outside the project: ${oneLine(real || 'unresolved')}`, isOnDisk: false }
+  }
+  const bytes = stat.size
   if (bytes > MAX_PREVIEW_BYTES) {
     return { text: '', note: `${Math.round(bytes / 1024)} KiB: too large to preview`, isOnDisk: true }
   }
@@ -557,7 +590,7 @@ async function mention($: EngineInterface, rel: string) {
   const before = text.slice(0, cursor)
   const lead = before === '' || /\s$/.test(before) ? '' : ' '
   const filled = await $.prompt.fill({ text: `${lead}@${rel} `, mode: 'insert' })
-  if (!filled.isFilled) $.ui.toast(`Could not insert @${rel}`)
+  if (!filled.isFilled) $.ui.toast(`Could not insert @${oneLine(rel)}`)
 }
 
 async function quote($: EngineInterface, text: string, caption: string, language: string) {
@@ -712,13 +745,13 @@ async function unfold($: EngineInterface, dir: string) {
 async function openLink($: EngineInterface, from: string, href: string) {
   const rel = resolveLink(from, href)
   if (rel === undefined) {
-    $.ui.toast(`Outside the project: ${href}`)
+    $.ui.toast(`Outside the project: ${oneLine(href)}`)
     return
   }
   const dir = await read($, root)
   const stat = await $.fs.stat(join(dir, rel)).catch(() => undefined)
   if (stat === undefined) {
-    $.ui.toast(`Not found: ${rel}`)
+    $.ui.toast(`Not found: ${oneLine(rel)}`)
     return
   }
   await unfold($, stat.kind === 'dir' ? rel : parentOf(rel))
@@ -801,6 +834,7 @@ async function followTool($: EngineInterface, tool: string, args: Record<string,
   const normal = filePath.replace(/\\/g, '/')
   if (!normal.startsWith(`${dir}/`)) return
   const rel = normal.slice(dir.length + 1)
+  if (!isPlainRelative(rel)) return
   if ((await read($, view)) === 'files') await unfold($, parentOf(rel))
 
   if (tool === 'Read') {
@@ -857,7 +891,7 @@ async function referenceLines($: EngineInterface, shown: ExplorerPreview) {
   const before = text.slice(0, cursor)
   const lead = before === '' || /\s$/.test(before) ? '' : ' '
   const filled = await $.prompt.fill({ text: `${lead}@${shown.path}${label === '' ? '' : ` (${label})`} `, mode: 'insert' })
-  if (!filled.isFilled) $.ui.toast(`Could not insert @${shown.path}`)
+  if (!filled.isFilled) $.ui.toast(`Could not insert @${oneLine(shown.path)}`)
 }
 
 // ---- drawing -------------------------------------------------------------
@@ -1019,7 +1053,7 @@ async function drawSidebar(
         node: () => (
           <Box key={`line:${commit.sha}`} flexDirection="row">
             <Text color="blue">{against.head === commit.sha ? '▌' : ' '}</Text>
-            <Text color="yellow">{commit.short} </Text>
+            <Text color="yellow">{fit(commit.short, 12)} </Text>
             <Button key={`commit:${commit.sha}`} label={subject} plain onPress={() => openCommit($, commit)} />
             {rest > 6 && <Text dimColor> {fit(`${commit.when}, ${commit.author}`, rest)}</Text>}
           </Box>
@@ -1490,7 +1524,7 @@ export const register: Register = (on, options) => {
       const dir = await read($, root)
       const normal = filePath.replace(/\\/g, '/')
       const rel = normal.startsWith(`${dir}/`) ? normal.slice(dir.length + 1) : normal
-      if (!rel.startsWith('/')) {
+      if (isPlainRelative(rel)) {
         await update($, touched, list => (list.includes(rel) ? list : [...list, rel]))
       }
     }

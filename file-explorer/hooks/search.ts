@@ -1,4 +1,5 @@
 import type { ExplorerHit } from '../types'
+import { hitLine } from './safe'
 
 // Fuzzy file-name match, as a quick-open does: every query character in
 // order, scored up for runs, word starts and hits in the base name.
@@ -63,7 +64,7 @@ export function parseGrep(raw: string, limit: number): ExplorerHit[] {
     const rest = record.slice(cut + 1)
     const match = /^(\d+)[:\0](\d+)[:\0]([\s\S]*)$/.exec(rest)
     if (match === null) continue
-    hits.push({ path, line: Number(match[1]), column: Number(match[2]), text: match[3] ?? '' })
+    hits.push({ path, line: Number(match[1]), column: Number(match[2]), text: hitLine(match[3] ?? '') })
   }
   return hits
 }
