@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
 const ROOT = '/work/app'
 
@@ -361,7 +361,7 @@ test('follows Claude, diffs the last prompt, and names lines', async ($, on) => 
     return { isFilled: true as const, text: e.text }
   })
   on('tool.call', async () => ({ result: {} as never }))
-  on('clock.now', async () => ({ value: new Date(2026, 9, 3, 12, 34).getTime() }))
+  const clock = mock.clock(on)
   on('ui.toast', async () => ({ value: undefined }))
 
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
@@ -369,11 +369,13 @@ test('follows Claude, diffs the last prompt, and names lines', async ($, on) => 
 
   // A prompt snapshots the working tree through the explorer's own index.
   await $.prompt.submit({ text: 'fix the needle', wait: false, origin: { kind: 'composer' } } as never)
+  await clock.settle()
   const added = runs.find(one => one.args === 'add -A')
   expect(added?.index).toBe(`${ROOT}/.git/file-explorer-index`)
 
   // Claude reading a file shows it at the lines it read.
   await $.tool.call({ tool: 'Read', file_path: `${ROOT}/src/util.ts`, offset: 40 } as never)
+  await clock.settle()
   let code = await ui.find({ type: 'Code' })
   expect(code?.props.path).toBe('src/util.ts')
   expect(code?.props.startLine).toBe(40)
@@ -386,6 +388,7 @@ test('follows Claude, diffs the last prompt, and names lines', async ($, on) => 
 
   // Claude editing a file shows the diff at the hunk it touched.
   await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/src/main.ts`, old_string: 'const needle = 0', new_string: 'const needle = 1' } as never)
+  await clock.settle()
   code = await ui.find({ type: 'Code' })
   expect(code?.props.format).toBe('diff')
   expect(String(code?.props.source)).toContain('+const needle = 1')
@@ -397,5 +400,6 @@ test('follows Claude, diffs the last prompt, and names lines', async ($, on) => 
   // Follow off: a read no longer moves the preview.
   await ui.press({ key: 'follow' })
   await $.tool.call({ tool: 'Read', file_path: `${ROOT}/src/util.ts` } as never)
+  await clock.settle()
   expect((await ui.find({ type: 'Code' }))?.props.format).toBe('diff')
 })
