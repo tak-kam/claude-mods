@@ -1,4 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
+import { buttonCells } from '../hooks/wrap'
 
 const ROOT = '/work/app'
 
@@ -765,4 +766,49 @@ test('wraps long lines by default, or cuts them and scrolls sideways', async ($,
   expect(String(code?.props.source).startsWith('x')).toBe(true)
   await ui.press({ key: 'left' })
   expect(String((await ui.find({ type: 'Code' }))?.props.source).startsWith('const value = ')).toBe(true)
+})
+
+test('keeps every toolbar Button inside the pane, so every hotkey is live', async ($, on) => {
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('fs.stat', async (_$, e) => STAT(e.path))
+  on('fs.list', async (_$, e) => ({
+    value: (TREE[e.path] ?? []).map(one => ({ ...one, mtimeMs: 0, isLink: false })),
+  }))
+  on('fs.read', async () => ({ value: `${'x'.repeat(300)}\n`.repeat(60) }))
+  on('process.run', async (_$, e) => fakeGit(e.argv, []))
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+  on('ui.panes', async () => ({ value: [] }))
+
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  type Node = { type?: string; key?: string; props?: Record<string, unknown>; children?: unknown[] }
+  const rowCells = (row: Node) =>
+    (row.children ?? [])
+      .map(child => child as Node)
+      .filter(child => child.type === 'Button')
+      .reduce((sum, child, i) => sum + (i > 0 ? 1 : 0) + buttonCells(String(child.props?.label ?? ''), child.props?.hotkey !== undefined), 0)
+
+  for (const columns of [80, 100, 120, 200]) {
+    const ui = await $.ui.mount(PANE('file-explorer', columns))
+    if ((await ui.find({ key: 'row:src/main.ts' })) === undefined) await ui.press({ key: 'row:src' })
+    await ui.press({ key: 'row:src/main.ts' })
+    await ui.press({ key: 'wrap' })
+    const sidebar = Math.min(44, Math.max(26, Math.floor(columns * 0.32)))
+    const previewWidth = columns - sidebar - 2
+
+    // Every hotkey Button is drawn, and each toolbar row fits the preview.
+    for (const key of ['up', 'down', 'wrap', 'quote', 'ref', 'tab:files', 'tab:changes', 'tab:history', 'tab:search']) {
+      expect(await ui.find({ key })).toBeDefined()
+    }
+    expect(await ui.find({ key: 'tools:0' })).toBeDefined()
+    expect(await ui.find({ key: 'tabs:0' })).toBeDefined()
+    for (let i = 0; i < 4; i++) {
+      const row = (await ui.find({ key: `tools:${i}` })) as Node | undefined
+      if (row !== undefined) expect(rowCells(row)).toBeLessThanOrEqual(previewWidth)
+      const tabs = (await ui.find({ key: `tabs:${i}` })) as Node | undefined
+      if (tabs !== undefined) expect(rowCells(tabs)).toBeLessThanOrEqual(sidebar)
+    }
+    await ui.press({ key: 'wrap' })
+    await ui.unmount()
+  }
 })
