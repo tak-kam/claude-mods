@@ -1,0 +1,44 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  mods:
+    name: mods (Claude Code ${{ matrix.claude-code }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # The pinned version is the one the mods are verified against and
+        # gates a merge. The function-hooks API is early access, so `latest`
+        # runs too, to show early when an update breaks a mod; it does not
+        # fail the workflow.
+        claude-code: ['2.1.289', 'latest']
+    continue-on-error: ${{ matrix.claude-code == 'latest' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Install Claude Code
+        run: npm install --global @anthropic-ai/claude-code@${{ matrix.claude-code }}
+
+      - name: Version
+        run: claude --version
+
+      # Neither needs an account: validate reads the manifests and sources,
+      # and the test kit runs each mod's hooks against the engine locally.
+      - name: Validate the marketplace and its mods
+        run: claude plugin validate .
+
+      - name: Test file-explorer
+        run: claude plugin test file-explorer
