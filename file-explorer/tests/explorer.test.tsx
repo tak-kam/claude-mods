@@ -956,3 +956,61 @@ test('shows the help in Japanese when the language option says so', { options: {
   const tables = (await ui.findAll({ type: 'Markdown' })).map(one => String(one.props.text))
   expect(tables.some(text => text.includes('一覧のスクロール'))).toBe(true)
 })
+
+test('copies the path and pins files, the pins kept per project', async ($, on) => {
+  const copies: string[] = []
+  let canCopy = true
+  const store = new Map<string, unknown>([[`pins:${ROOT}`, ['README.md', 'gone.txt']]])
+  on('store.get', async (_$, e) => ({ value: store.get(e.key) }))
+  on('store.set', async (_$, e) => {
+    store.set(e.key, e.value)
+    return { value: undefined }
+  })
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('fs.stat', async (_$, e) => STAT(e.path))
+  on('fs.exists', async (_$, e) => ({ value: !e.path.endsWith('gone.txt') }))
+  on('fs.list', async (_$, e) => ({
+    value: (TREE[e.path] ?? []).map(one => ({ ...one, mtimeMs: 0, isLink: false })),
+  }))
+  on('fs.read', async () => ({ value: 'export {}\n' }))
+  on('process.run', async (_$, e) => fakeGit(e.argv, []))
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+  on('ui.panes', async () => ({ value: [] }))
+  on('ui.toast', async () => ({ value: undefined }))
+  on('ui.copy', async (_$, e) => {
+    copies.push(e.text)
+    return { value: canCopy ? { isCopied: true as const } : { isCopied: false as const, reason: 'no-clipboard' as const } }
+  })
+
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE('file-explorer', 120))
+
+  // Kept pins load; one whose file is gone is dropped (and the store pruned).
+  expect(await ui.find({ key: 'pinned:README.md' })).toBeDefined()
+  expect(await ui.find({ key: 'pinned:gone.txt' })).toBeUndefined()
+  expect(store.get(`pins:${ROOT}`)).toEqual(['README.md'])
+
+  // Pin a file from the preview: it joins the list and the store.
+  await ui.press({ key: 'row:src' })
+  await ui.press({ key: 'row:src/main.ts' })
+  expect((await ui.find({ key: 'pin' }))?.props.label).toBe('☆')
+  await ui.press({ key: 'pin' })
+  expect((await ui.find({ key: 'pin' }))?.props.label).toBe('★')
+  expect(store.get(`pins:${ROOT}`)).toEqual(['README.md', 'src/main.ts'])
+  await ui.press({ key: 'pinned:README.md' })
+  expect(await ui.find({ type: 'Markdown' })).toBeDefined()
+
+  // Copy the path; a failed copy is reported, not silent.
+  await ui.press({ key: 'copy' })
+  expect(copies).toEqual(['README.md'])
+  canCopy = false
+  await ui.press({ key: 'copy' })
+  expect(copies).toHaveLength(2)
+
+  // Unpin.
+  await ui.press({ key: 'pinned:src/main.ts' })
+  await ui.press({ key: 'pin' })
+  expect(store.get(`pins:${ROOT}`)).toEqual(['README.md'])
+  expect(await ui.find({ key: 'pinned:src/main.ts' })).toBeUndefined()
+})

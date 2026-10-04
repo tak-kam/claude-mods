@@ -31,6 +31,8 @@ In **Changes**, press the base (\`vs HEAD\`) to cycle HEAD, the last prompt and 
 | \`◀\` \`▶\` | Scroll sideways, with wrapping off (click) |
 | \`q\` | Quote the mouse selection into the prompt |
 | \`r\` | Insert \`@file (lines a-b)\`: the selection, else the lines in view |
+| \`y\` | Copy the file's path |
+| \`b\` | Pin or unpin the file (pins list at the top of Files, kept per project) |
 | \`❝ quote\` | Quote one diff hunk (click) |
 
 ## Search
@@ -81,6 +83,8 @@ export const HELP_JA = `# キーとコマンド
 | \`◀\` \`▶\` | 横スクロール（折り返しオフのとき、クリック） |
 | \`q\` | マウスで選択した範囲をプロンプトに引用 |
 | \`r\` | \`@file (lines a-b)\` を入れる（選択範囲、なければ表示中の行） |
+| \`y\` | ファイルのパスをコピー |
+| \`b\` | ファイルをピン留め・解除（Files の一番上に並び、プロジェクトごとに保存） |
 | \`❝ quote\` | diff のまとまりを 1 つ引用（クリック） |
 
 ## 検索

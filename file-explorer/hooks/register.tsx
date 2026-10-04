@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { ElementTable, EngineInterface, Register, RenderElement } from 'claude-code'
+import type { ElementTable, EngineInterface, Register, RenderElement, RenderSurface } from 'claude-code'
 
 import type {
   ExplorerBase,
@@ -62,6 +62,7 @@ const NO_SEARCH: ExplorerSearch = {
   note: '',
 }
 const search = atom({ plugin: 'file-explorer', key: 'search' } as const, NO_SEARCH)
+const pins = atom({ plugin: 'file-explorer', key: 'pins' } as const, [])
 const listOffset = atom({ plugin: 'file-explorer', key: 'listOffset' } as const, 0)
 const follow = atom({ plugin: 'file-explorer', key: 'follow' } as const, true)
 const lastPrompt = atom({ plugin: 'file-explorer', key: 'lastPrompt' } as const, null)
@@ -576,6 +577,32 @@ async function quoteSelection($: EngineInterface, path: string | undefined): Pro
 
 
 
+// ---- pins and copying ----------------------------------------------------
+
+// Pins are kept per project in the store, so they outlast the session.
+const pinsKey = (dir: string) => `pins:${dir}`
+
+async function loadPins($: EngineInterface) {
+  const dir = await read($, root)
+  const kept = await $.store.get(pinsKey(dir)).catch(() => undefined)
+  const list = Array.isArray(kept) ? kept.filter((one): one is string => typeof one === 'string' && isPlainRelative(one)) : []
+  const live: string[] = []
+  for (const rel of list) if (await $.fs.exists(join(dir, rel)).catch(() => false)) live.push(rel)
+  await update($, pins, () => live)
+  if (live.length !== list.length) await $.store.set(pinsKey(dir), live).catch(() => undefined)
+}
+
+async function togglePin($: EngineInterface, rel: string) {
+  const dir = await read($, root)
+  await update($, pins, list => (list.includes(rel) ? list.filter(one => one !== rel) : [...list, rel]))
+  await $.store.set(pinsKey(dir), await read($, pins)).catch(() => undefined)
+}
+
+async function copyPath($: EngineInterface, rel: string, surface: RenderSurface) {
+  const copied = await $.ui.copy({ text: rel, surface })
+  $.ui.toast(copied.isCopied ? `Copied ${oneLine(rel)}` : `Could not copy (${copied.reason})`)
+}
+
 // The help takes the preview's place; `i` again brings back what was there.
 const beforeHelp: { shown?: ExplorerPreview | null } = {}
 
@@ -1032,7 +1059,30 @@ async function drawSidebar(
     const folders = folderBadges(list)
     const tree = flatten(all, open)
     if (tree.length === 0) extra.push(<Text dimColor>(empty)</Text>)
-    lines = tree.map(({ rel, depth, entry }) => {
+    const pinned = await read($, pins)
+    const pinLines = pinned.length === 0 ? [] : [
+      { key: 'pins:header', node: () => <Text key="pins:header" dimColor>★ Pinned</Text> },
+      ...pinned.map(rel => {
+        const icon = iconFor(baseName(rel), false, false, layout.icons)
+        const room = width - 3 - iconWidth(icon, layout.icons)
+        const label = fit(baseName(rel), room)
+        const rest = room - label.length - 1
+        return {
+          key: `pin:${rel}`,
+          node: () => (
+            <Box key={`pinline:${rel}`} flexDirection="row">
+              <Text color="blue">{rel === chosen ? '▌' : ' '}</Text>
+              <Text> </Text>
+              {icon.glyph !== '' && <Text color={icon.color}>{icon.glyph}</Text>}
+              <Button key={`pinned:${rel}`} label={label} plain onPress={() => showPath($, rel, { mode: fileMode(rel) })} />
+              {parentOf(rel) !== '' && rest > 3 && <Text dimColor> {fit(parentOf(rel), rest)}</Text>}
+            </Box>
+          ),
+        }
+      }),
+    ]
+    lines = pinLines
+    lines = lines.concat(tree.map(({ rel, depth, entry }) => {
       const letter = entry.isDir ? folders[rel] : status[rel]
       const badge = letter === undefined ? '' : entry.isDir ? '●' : letter
       const mark = edited.has(rel) ? '✎' : ''
@@ -1069,7 +1119,7 @@ async function drawSidebar(
           </Box>
         ),
       }
-    })
+    }))
   }
 
   const room = rows === undefined ? lines.length : Math.max(1, rows - fixed - extra.length)
@@ -1232,6 +1282,13 @@ async function drawPreview(
   if (shown.isHelp !== true) {
     tools.push(tool('quote', '❝', 'q', () => <Button key="quote" label="❝" plain hotkey="q" onPress={() => quoteSelection($, shown.path)} />))
     tools.push(tool('ref', '#', 'r', () => <Button key="ref" label="#" plain hotkey="r" onPress={() => referenceLines($, shown)} />))
+    tools.push(tool('copy', '⧉', 'y', () => (
+      <Button key="copy" label="⧉" plain hotkey="y" onPress={press => copyPath($, shown.path, press.surface)} />
+    )))
+    const isPinned = (await read($, pins)).includes(shown.path)
+    tools.push(tool('pin', '★', 'b', () => (
+      <Button key="pin" label={isPinned ? '★' : '☆'} plain hotkey="b" onPress={() => togglePin($, shown.path)} />
+    )))
   }
   if (isOwnPane) {
     tools.push(tool('mention', '@', undefined, () => <Button key="mention" label="@" plain onPress={() => mention($, shown.path)} />))
@@ -1477,6 +1534,7 @@ export const register: Register = (on, options) => {
       await update($, listings, () => ({}))
       await update($, base, () => HEAD)
     }
+    await loadPins($)
     await refreshAll($)
     void $.ui.open({ id: EXPLORER, title: 'Explorer' })
 
