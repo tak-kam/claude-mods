@@ -1,12 +1,21 @@
 {
   "name": "claude-mods",
-  "owner": { "name": "tak-kam" },
-  "metadata": { "description": "Claude Code mods (function hook plugins)" },
+  "owner": {
+    "name": "tak-kam"
+  },
+  "metadata": {
+    "description": "Claude Code mods (function hook plugins)"
+  },
   "plugins": [
     {
       "name": "file-explorer",
       "source": "./file-explorer",
       "description": "A VS Code-style explorer pane: files, git changes, history, diffs and quoting into the prompt"
+    },
+    {
+      "name": "herdr-bridge",
+      "source": "./herdr-bridge",
+      "description": "Tells herdr what Claude Code is doing and asking: the prompt as the pane title, the question or permission it waits on, and a summary of each turn"
     }
   ]
 }

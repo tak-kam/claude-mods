@@ -1,0 +1,23 @@
+{
+  "name": "herdr-bridge",
+  "version": "0.1.0",
+  "description": "Tells herdr what Claude Code is doing and asking: the prompt as the pane's title, the question or permission it waits on, and a summary of each turn",
+  "author": { "name": "tak-kam" },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "mode": {
+      "type": "string",
+      "title": "Report mode",
+      "description": "metadata: change only what herdr shows (title, labels, summary), beside herdr's own Claude integration. state: also report working/blocked/idle from the exact events, so herdr's waits and notifications follow them",
+      "default": "metadata",
+      "options": ["metadata", "state"]
+    },
+    "text": {
+      "type": "string",
+      "title": "Text sent to herdr",
+      "description": "full: the prompt, the question and the command waited on. labels: only generic labels (\"waiting on a question\"), no text from the session",
+      "default": "full",
+      "options": ["full", "labels"]
+    }
+  }
+}
