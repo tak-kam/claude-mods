@@ -5,6 +5,7 @@ Claude Code mods: plugins of function hooks that add panes and commands to Claud
 | Mod | What it does |
 | --- | --- |
 | [file-explorer](./file-explorer) | VS Code-style explorer pane: file tree with git decorations, changes against any ref or range, commit history, diffs per hunk, and quoting into the prompt |
+| [herdr-bridge](./herdr-bridge) | For Claude Code run inside [herdr](https://github.com/herdrdev/herdr): tells herdr the prompt, the question or permission Claude waits on, and how each turn ended |
 
 ## Install
 
@@ -13,6 +14,7 @@ This repository is a Claude Code plugin marketplace.
 ```sh
 claude plugin marketplace add tak-kam/claude-mods
 claude plugin install file-explorer@claude-mods
+claude plugin install herdr-bridge@claude-mods   # if you use herdr
 ```
 
 Or inside a session: `/plugin marketplace add tak-kam/claude-mods`, then `/plugin install file-explorer@claude-mods`.
@@ -37,6 +39,24 @@ claude --plugin-dir ./file-explorer
 > APM (`apm install`) is not supported: it splits Claude plugins into settings-style
 > hooks, skills and agents, and does not carry a function hooks module (`hooks/hooks.json`
 > with `modules`).
+
+## herdr-bridge
+
+For Claude Code running inside [herdr](https://github.com/herdrdev/herdr), the terminal agent multiplexer. herdr's own Claude integration (`herdr integration install claude`) reports the session, and herdr reads the screen to tell working from blocked; this mod sees Claude's events themselves and tells herdr what they are:
+
+| Claude Code | herdr's sidebar |
+| --- | --- |
+| a prompt is sent | title: the prompt's first line; label: working |
+| `AskUserQuestion` | blocked: `Q: Which approach?` |
+| a permission prompt | blocked: `Permission: Bash npm test` |
+| a turn ends | idle: done / interrupted / error, and `$summary`: `4 tools · 2m 10s` |
+| the session ends | the above cleared |
+
+- It does nothing outside herdr (it needs `HERDR_ENV=1`, `HERDR_PANE_ID` and `HERDR_BIN_PATH`, which herdr sets in its panes)
+- By default it changes only what herdr shows (`herdr pane report-metadata`, as agent `claude`, source `claude-mods:herdr-bridge`), so herdr's own integration keeps the state and session resume. Set the `mode` option in `/config` to `state` to also report working / blocked / idle from the exact events (`herdr pane report-agent`), so herdr's waits and notifications follow them; the source is released when the session ends
+- Set the `text` option to `labels` to send no words from the session: "waiting on a question" instead of the question, no prompt as the title
+- Reports go after Claude's own work, with a 3 second timeout, failures ignored, and numbered (`--seq`) so a late one never overwrites a newer one; slash commands leave the pane as it is
+- Show the summary in herdr's sidebar with `$summary` in its agent row format (see herdr's configuration reference)
 
 ## file-explorer
 
