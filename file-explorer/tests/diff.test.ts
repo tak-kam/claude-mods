@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { clipDiff, hunkOffset, letterOf, parseLog, parseNameStatus, sliceHunk, splitHunks, parseBlame, parseFileLog, UNCOMMITTED, isPlainBranch, parsePullRequest, pullLabel } from '../hooks/diff'
+import { clipDiff, hunkOffset, letterOf, parseLog, parseNameStatus, sliceHunk, splitHunks, parseBlame, parseFileLog, UNCOMMITTED, isPlainBranch, parseGitHubRemote, parsePullRequest, parseRestPull, pullLabel } from '../hooks/diff'
 
 describe('letterOf', () => {
   test('maps git status codes to the letters drawn', () => {
@@ -196,6 +196,25 @@ describe('pull requests', () => {
     expect(parsePullRequest(JSON.stringify({ number: 0, baseRefName: 'main' }))).toBeUndefined()
     expect(parsePullRequest(JSON.stringify({ number: 3, baseRefName: '--upload-pack=x' }))).toBeUndefined()
     expect(parsePullRequest(JSON.stringify({ number: 3, baseRefName: 'main', headRefOid: 'nope' }))).toEqual({ number: 3, title: '', baseRefName: 'main' })
+  })
+
+  test("GitHub's REST answers, one or a list", () => {
+    const sha = 'd'.repeat(40)
+    const one = { number: 9, title: 'Hi', base: { ref: 'main' }, head: { sha } }
+    expect(parseRestPull(JSON.stringify(one))).toEqual({ number: 9, title: 'Hi', baseRefName: 'main', headRefOid: sha })
+    expect(parseRestPull(JSON.stringify([one]))?.number).toBe(9)
+    expect(parseRestPull('[]')).toBeUndefined()
+    expect(parseRestPull(JSON.stringify({ message: 'API rate limit exceeded' }))).toBeUndefined()
+    expect(parseRestPull(JSON.stringify({ ...one, base: { ref: '-x' } }))).toBeUndefined()
+  })
+
+  test('github.com remotes only', () => {
+    expect(parseGitHubRemote('https://github.com/acme/app.git')).toEqual({ owner: 'acme', repo: 'app' })
+    expect(parseGitHubRemote('git@github.com:acme/app.js.git\n')).toEqual({ owner: 'acme', repo: 'app.js' })
+    expect(parseGitHubRemote('ssh://git@github.com/acme/app')).toEqual({ owner: 'acme', repo: 'app' })
+    expect(parseGitHubRemote('https://token@github.com/acme/app')).toEqual({ owner: 'acme', repo: 'app' })
+    expect(parseGitHubRemote('https://gitlab.com/acme/app.git')).toBeUndefined()
+    expect(parseGitHubRemote('https://github.com/acme/../x')).toBeUndefined()
   })
 
   test('branch names and labels', () => {

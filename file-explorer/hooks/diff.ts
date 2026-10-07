@@ -186,16 +186,9 @@ export function isPlainBranch(name: string): boolean {
   return /^[A-Za-z0-9._/-]+$/.test(name) && !name.startsWith('-') && !name.includes('..') && !name.endsWith('/') && !name.endsWith('.lock')
 }
 
-// `gh pr view --json number,title,baseRefName,headRefOid`: what the explorer
-// needs of a pull request, or nothing when gh said something else.
-export function parsePullRequest(stdout: string): PullRequest | undefined {
-  let data: unknown
-  try {
-    data = JSON.parse(stdout)
-  } catch {
-    return undefined
-  }
-  const pr = data as { number?: unknown; title?: unknown; baseRefName?: unknown; headRefOid?: unknown }
+// What the explorer needs of a pull request, checked: a real number, a base
+// branch git can take as is (never an option), an oid, a one-line title.
+function checkedPull(pr: { number?: unknown; title?: unknown; baseRefName?: unknown; headRefOid?: unknown }): PullRequest | undefined {
   if (typeof pr.number !== 'number' || !Number.isInteger(pr.number) || pr.number <= 0) return undefined
   if (typeof pr.baseRefName !== 'string' || !isPlainBranch(pr.baseRefName)) return undefined
   const head = typeof pr.headRefOid === 'string' && /^[0-9a-f]{40}$/.test(pr.headRefOid) ? pr.headRefOid : undefined
@@ -205,6 +198,40 @@ export function parsePullRequest(stdout: string): PullRequest | undefined {
     baseRefName: pr.baseRefName,
     ...(head === undefined ? {} : { headRefOid: head }),
   }
+}
+
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return undefined
+  }
+}
+
+// `gh pr view --json number,title,baseRefName,headRefOid`.
+export function parsePullRequest(stdout: string): PullRequest | undefined {
+  const data = parseJson(stdout)
+  return data !== null && typeof data === 'object' ? checkedPull(data as Record<string, unknown>) : undefined
+}
+
+// GitHub's REST API: one pull request (`/pulls/N`), or the first of a list
+// (`/pulls?head=owner:branch`).
+export function parseRestPull(text: string): PullRequest | undefined {
+  const data = parseJson(text)
+  const one = (Array.isArray(data) ? data[0] : data) as
+    | { number?: unknown; title?: unknown; base?: { ref?: unknown }; head?: { sha?: unknown } }
+    | undefined
+  if (one === null || typeof one !== 'object') return undefined
+  return checkedPull({ number: one.number, title: one.title, baseRefName: one.base?.ref, headRefOid: one.head?.sha })
+}
+
+// The owner and name of a github.com remote, from its https or ssh URL;
+// nothing for any other host (its API is not GitHub's).
+export function parseGitHubRemote(url: string): { owner: string; repo: string } | undefined {
+  const match = /^(?:https:\/\/(?:[^@/]+@)?github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?\/?$/.exec(url.trim())
+  if (match === null) return undefined
+  const [, owner = '', repo = ''] = match
+  return repo === '' || repo === '.' || repo === '..' ? undefined : { owner, repo }
 }
 
 // How a pull request is named in the base Button: `#41 title`.
