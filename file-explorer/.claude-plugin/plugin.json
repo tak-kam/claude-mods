@@ -1,6 +1,6 @@
 {
   "name": "file-explorer",
-  "version": "0.19.0",
+  "version": "0.20.0",
   "description": "A VS Code-style file explorer pane: tree, git decorations, preview and @-mention",
   "types": "./types/index.d.ts",
   "author": {

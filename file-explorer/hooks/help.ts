@@ -19,7 +19,7 @@ Keys work while the explorer has the keyboard: click it, or press \`ctrl+x tab\`
 | \`g\` | Hide what .gitignore leaves out, or show it dimmed |
 | \`i\` | Open or close this help |
 
-In **Changes**, press the base (\`vs HEAD\`) to cycle HEAD, the last prompt, this branch's pull request (with \`gh\`) and the default branch, or type a ref, \`a..b\`, \`pr\` or \`pr 123\` in the field below it. \`pr 123\` fetches that pull request from origin and shows it as GitHub does.
+In **Changes**, press the base (\`vs HEAD\`) to cycle HEAD, the last prompt, this branch's pull request and the default branch, or type a ref, \`a..b\`, \`pr\` or \`pr 123\` in the field below it. \`pr 123\` fetches that pull request and its base branch from origin and shows it as GitHub does. A pull request's base comes from \`gh\`, else GitHub's public API; name one yourself after it: \`pr 123 develop\`, \`pr develop\`.
 
 ## Preview (right)
 
@@ -63,7 +63,7 @@ PNG files are drawn in the preview where the terminal can show pictures (kitty, 
 | Command | Does |
 | --- | --- |
 | \`/files [files\\|changes\\|history\\|search\\|outline\\|help]\` | Open the explorer |
-| \`/changes [ref \\| a..b \\| a...b \\| turn \\| pr [number]]\` | Changes against a base, or a pull request |
+| \`/changes [ref \\| a..b \\| a...b \\| turn \\| pr [number] [base]]\` | Changes against a base, or a pull request |
 | \`/search text\` | Search file contents |
 | \`/quote\` | Quote the mouse selection |
 | \`/ref\` | Insert \`@file (lines a-b)\` |
@@ -90,7 +90,7 @@ export const HELP_JA = `# キーとコマンド
 | \`g\` | .gitignore で除外されたものを隠す・薄く表示する |
 | \`i\` | このヘルプを開く・閉じる |
 
-**Changes** では、比較の基準（\`vs HEAD\`）を押すと HEAD、直前の指示、このブランチの PR（\`gh\` があれば）、既定ブランチの順に切り替わります。その下の欄に ref、\`a..b\`、\`pr\`、\`pr 123\` を入力することもできます。\`pr 123\` は origin からその PR を取得し、GitHub と同じ差分を表示します。
+**Changes** では、比較の基準（\`vs HEAD\`）を押すと HEAD、直前の指示、このブランチの PR、既定ブランチの順に切り替わります。その下の欄に ref、\`a..b\`、\`pr\`、\`pr 123\` を入力することもできます。\`pr 123\` は origin からその PR とマージ先ブランチを取得し、GitHub と同じ差分を表示します。PR のマージ先は \`gh\`、無ければ GitHub の公開 API から調べます。\`pr 123 develop\`、\`pr develop\` のように自分で指定することもできます。
 
 ## プレビュー（右）
 
@@ -134,7 +134,7 @@ Markdown プレビューの \`\`\`mermaid ブロックは、mermaid-cli（\`mmdc
 | コマンド | 動作 |
 | --- | --- |
 | \`/files [files\\|changes\\|history\\|search\\|outline\\|help]\` | エクスプローラーを開く |
-| \`/changes [ref \\| a..b \\| a...b \\| turn \\| pr [number]]\` | 基準と比べた変更、または PR の差分を表示 |
+| \`/changes [ref \\| a..b \\| a...b \\| turn \\| pr [number] [base]]\` | 基準と比べた変更、または PR の差分を表示 |
 | \`/search 文字列\` | ファイルの中身を検索 |
 | \`/quote\` | マウスで選択した範囲を引用 |
 | \`/ref\` | \`@file (lines a-b)\` を入れる |

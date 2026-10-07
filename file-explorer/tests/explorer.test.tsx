@@ -1591,6 +1591,17 @@ test("shows this branch's pull request and fetches another by number", async ($,
     toasts.push(String((e as { text?: unknown }).text ?? e))
     return { value: undefined }
   })
+  const asked: string[] = []
+  on('http.fetch', async (_$, e) => {
+    asked.push(e.url)
+    if (e.url === 'https://api.github.com/repos/acme/app/pulls/7') {
+      return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ number: 7, title: 'Fix login', base: { ref: 'develop' }, head: { sha: 'b'.repeat(40) } }) } }
+    }
+    if (e.url.startsWith('https://api.github.com/repos/acme/app/pulls?')) {
+      return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify([{ number: 41, title: 'Login', base: { ref: 'main' }, head: { sha: 'a'.repeat(40) } }]) } }
+    }
+    return { value: { status: 404, ok: false, headers: {}, text: '{}' } }
+  })
   on('process.run', async (_$, e) => {
     runs.push({ argv: [...e.argv], env: e.init?.env })
     if (e.argv[0] === 'gh') {
@@ -1604,7 +1615,11 @@ test("shows this branch's pull request and fetches another by number", async ($,
     if (line.startsWith('fetch ')) return ok('')
     if (line === 'rev-parse --verify -q refs/file-explorer/pull/7^{commit}') return ok('pr7head\n')
     if (line === 'merge-base origin/main HEAD' || line === 'merge-base HEAD origin/main') return ok('forkpoint\n')
-    if (line === 'merge-base origin/develop pr7head') return ok('base7\n')
+    if (line === 'merge-base refs/file-explorer/base/develop pr7head') return ok('base7\n')
+    if (line === 'merge-base refs/file-explorer/base/release pr7head') return ok('baseR\n')
+    if (line === 'merge-base origin/release HEAD') return ok('forkR\n')
+    if (line === 'remote get-url origin') return ok('git@github.com:acme/app.git\n')
+    if (line === 'symbolic-ref --short -q HEAD') return ok('feature/login\n')
     if (line.startsWith('diff --relative --name-status') && e.argv.includes('pr7head')) return ok('A\0src/login.ts\0')
     return fakeGit(e.argv, [])
   })
@@ -1626,24 +1641,45 @@ test("shows this branch's pull request and fetches another by number", async ($,
   await ui.press({ key: 'base' })
   expect((await ui.find({ key: 'base' }))?.props.label).toBe('HEAD')
 
-  // Another PR by number: fetched into the explorer's own ref, safely, and shown from its fork point.
+  // Another PR by number: fetched into the explorer's own ref, safely, its base
+  // branch fetched beside it, and shown from today's fork point.
   await $.command.run({ command: 'changes', args: 'pr 7' } as never)
-  const fetch = runs.find(run => run.argv.includes('fetch'))
-  expect(fetch?.argv).toContain('protocol.ext.allow=never')
-  expect(fetch?.argv).toContain('+refs/pull/7/head:refs/file-explorer/pull/7')
-  expect(fetch?.env?.GIT_TERMINAL_PROMPT).toBe('0')
+  const fetches = runs.filter(run => run.argv.includes('fetch'))
+  expect(fetches.map(run => run.argv.at(-1))).toEqual([
+    '+refs/pull/7/head:refs/file-explorer/pull/7',
+    '+refs/heads/develop:refs/file-explorer/base/develop',
+  ])
+  expect(fetches.every(run => run.argv.includes('protocol.ext.allow=never') && run.env?.GIT_TERMINAL_PROMPT === '0')).toBe(true)
   expect((await ui.find({ key: 'base' }))?.props.label).toBe('#7 Fix login (vs develop)')
   expect(await ui.find({ key: 'change:src/login.ts' })).toBeDefined()
   expect(runs.filter(run => run.argv.includes('--name-status')).at(-1)?.argv.slice(-2)).toEqual(['base7', 'pr7head'])
 
-  // `#7` is the same; a number that is not one is a ref, and never fetched.
-  const fetches = runs.filter(run => run.argv.includes('fetch')).length
-  await $.command.run({ command: 'changes', args: 'pr -1' } as never)
-  expect(runs.filter(run => run.argv.includes('fetch')).length).toBe(fetches)
+  // A base named after the number wins over the PR's own.
+  await $.command.run({ command: 'changes', args: '#7 release' } as never)
+  expect((await ui.find({ key: 'base' }))?.props.label).toBe('#7 Fix login (vs release)')
+  expect(runs.filter(run => run.argv.includes('--name-status')).at(-1)?.argv.slice(-2)).toEqual(['baseR', 'pr7head'])
 
-  // Without gh: no PR to find, so the default branch, and said so.
+  // Not a number, or not a branch: never fetched.
+  const fetched = runs.filter(run => run.argv.includes('fetch')).length
+  await $.command.run({ command: 'changes', args: 'pr -1' } as never)
+  await $.command.run({ command: 'changes', args: 'pr 7 --upload-pack=x' } as never)
+  expect(runs.filter(run => run.argv.includes('fetch')).length).toBe(fetched)
+  expect(toasts.some(text => text.startsWith('Not a branch'))).toBe(true)
+  expect(asked).toEqual([])
+
+  // Without gh: GitHub's public API names the PR, by number or by this branch.
   hasGh = false
+  await $.command.run({ command: 'changes', args: 'pr 7' } as never)
+  expect((await ui.find({ key: 'base' }))?.props.label).toBe('#7 Fix login (vs develop)')
   await $.command.run({ command: 'changes', args: 'pr' } as never)
-  expect(String((await ui.find({ key: 'base' }))?.props.label)).toContain('(merge-base)')
-  expect(toasts.some(text => text.includes('needs gh'))).toBe(true)
+  expect((await ui.find({ key: 'base' }))?.props.label).toBe('#41 Login (vs main)')
+  expect(asked).toEqual([
+    'https://api.github.com/repos/acme/app/pulls/7',
+    'https://api.github.com/repos/acme/app/pulls?state=open&per_page=1&head=acme%3Afeature%2Flogin',
+  ])
+
+  // This branch against a base of your choosing.
+  await $.command.run({ command: 'changes', args: 'pr release' } as never)
+  expect((await ui.find({ key: 'base' }))?.props.label).toBe('#41 Login (vs release)')
+  expect(runs.filter(run => run.argv.includes('--name-status')).at(-1)?.argv).toContain('forkR')
 })

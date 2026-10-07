@@ -16,7 +16,7 @@ import type {
 import { iconFor, iconWidth } from './icons'
 import { compileQuery, excerpt, fuzzyFilter, fuzzyIndex, matchSpan, parseGrep } from './search'
 import { cellWidth, fitCells, localLinks, markdownWindow, resolveLink, splitMarkdown } from './markdown'
-import { clipDiff, hunkOffset, isPlainBranch, parseBlame, parseFileLog, parseLog, parseNameStatus, parsePullRequest, pullLabel, sliceHunk, splitHunks, UNCOMMITTED } from './diff'
+import { clipDiff, hunkOffset, isPlainBranch, parseBlame, parseFileLog, parseGitHubRemote, parseLog, parseNameStatus, parsePullRequest, parseRestPull, pullLabel, sliceHunk, splitHunks, UNCOMMITTED } from './diff'
 import { cleanText, isPlainRelative, oneLine } from './safe'
 import { helpText } from './help'
 import { formatAge, formatSize, isIgnored, parseIgnored } from './details'
@@ -29,6 +29,7 @@ import type { Converters, RasterTool } from './convert'
 import { cacheFolder, diagramKey, isMermaid, MAX_DIAGRAM_CHARS, mmdcArgs, mmdcError } from './mermaid'
 import type { OutlineEntry, OutlineKind } from './outline'
 import type { HelpLanguage } from './help'
+import type { PullRequest } from './diff'
 import { buttonCells, fitCount, lastStart, packRows, rowsOf, shiftCells, widest } from './wrap'
 import type { IconStyle } from './icons'
 
@@ -359,43 +360,83 @@ async function mergeBaseWith($: EngineInterface, branch: string, head: string): 
   return undefined
 }
 
+// Without gh: GitHub's public REST API, for a github.com origin. It answers
+// for public repositories (a private one needs gh); a refusal is no answer.
+async function restPull($: EngineInterface, number?: number): Promise<PullRequest | undefined> {
+  const remote = await git($, ['remote', 'get-url', 'origin'])
+  const repo = remote.exitCode === 0 ? parseGitHubRemote(remote.stdout) : undefined
+  if (repo === undefined) return undefined
+  let path = `/repos/${repo.owner}/${repo.repo}/pulls/${number ?? ''}`
+  if (number === undefined) {
+    const branch = (await git($, ['symbolic-ref', '--short', '-q', 'HEAD'])).stdout.trim()
+    if (!isPlainBranch(branch)) return undefined
+    path = `/repos/${repo.owner}/${repo.repo}/pulls?state=open&per_page=1&head=${encodeURIComponent(`${repo.owner}:${branch}`)}`
+  }
+  const answer = await $.http
+    .fetch(`https://api.github.com${path}`, {
+      headers: { accept: 'application/vnd.github+json', 'user-agent': 'claude-mods-file-explorer' },
+    })
+    .catch(() => undefined)
+  return answer?.ok === true ? parseRestPull(answer.text) : undefined
+}
+
+// A pull request's base, number and title: from gh, else GitHub's API.
+async function pullInfo($: EngineInterface, number?: number): Promise<PullRequest | undefined> {
+  return (await ghPull($, number === undefined ? [] : [String(number)])) ?? (await restPull($, number))
+}
+
 // This branch's pull request, as GitHub shows it: from where the branch
-// left its base to the working tree (uncommitted work included).
-async function branchPullBase($: EngineInterface): Promise<ExplorerBase | undefined> {
-  const pr = await ghPull($, [])
-  if (pr === undefined) return undefined
-  const ref = await mergeBaseWith($, pr.baseRefName, 'HEAD')
-  return ref === undefined ? undefined : { ref, label: `${pullLabel(pr)} (vs ${pr.baseRefName})`, kind: 'pr' }
+// left its base to the working tree (uncommitted work included). `target`,
+// when given, is the base: the PR's own is only asked for its name.
+async function branchPullBase($: EngineInterface, target?: string): Promise<ExplorerBase | undefined> {
+  const pr = await pullInfo($)
+  const branch = target ?? pr?.baseRefName
+  if (branch === undefined) return undefined
+  const ref = await mergeBaseWith($, branch, 'HEAD')
+  if (ref === undefined) return undefined
+  return { ref, label: `${pr === undefined ? 'this branch' : pullLabel(pr)} (vs ${branch})`, kind: 'pr' }
 }
 
 // Remote-supplied config could name a program for a transport; a fetch the
 // explorer runs allows none, never prompts, and gives up in a minute.
 const FETCH_SAFETY = ['-c', 'protocol.ext.allow=never', '-c', 'protocol.file.allow=never', '-c', 'core.fsmonitor=false']
 
-// Another pull request, by number: its head fetched from origin (GitHub's
-// `pull/N/head`) into a ref of the explorer's own, and shown from where it
-// left its base to that head. Only when asked: this goes to the network.
-async function openPull($: EngineInterface, number: number) {
-  const pr = await ghPull($, [String(number)])
+async function fetchRef($: EngineInterface, refspec: string) {
   const cwd = await read($, root)
-  const local = `refs/file-explorer/pull/${number}`
-  $.ui.toast(`Fetching pull request #${number}…`)
-  const fetched = await $.process
-    .run(['git', ...FETCH_SAFETY, 'fetch', '--no-tags', '--no-write-fetch-head', 'origin', `+refs/pull/${number}/head:${local}`], {
+  return $.process
+    .run(['git', ...FETCH_SAFETY, 'fetch', '--no-tags', '--no-write-fetch-head', 'origin', refspec], {
       cwd,
       timeoutMs: 60000,
       env: { GIT_TERMINAL_PROMPT: '0' },
     })
     .catch(() => ({ exitCode: -1, stdout: '', stderr: 'git could not run' }))
+}
+
+// Another pull request, by number: its head fetched from origin (GitHub's
+// `pull/N/head`) into a ref of the explorer's own, its base branch fetched
+// beside it so the fork point is today's, and shown from that fork point to
+// the head, as GitHub shows it. Only when asked: this goes to the network.
+async function openPull($: EngineInterface, number: number, target?: string) {
+  const pr = await pullInfo($, number)
+  const local = `refs/file-explorer/pull/${number}`
+  $.ui.toast(`Fetching pull request #${number}…`)
+  const fetched = await fetchRef($, `+refs/pull/${number}/head:${local}`)
   const head = fetched.exitCode === 0 ? await resolveCommit($, local) : undefined
   if (head === undefined) {
     $.ui.toast(`Could not fetch pull request #${number}: ${oneLine(fetched.stderr.trim().split('\n').pop() ?? '')}`)
     return
   }
-  const branch = pr?.baseRefName ?? (await defaultBranchName($))
-  const ref = branch === undefined ? undefined : await mergeBaseWith($, branch, head)
-  if (ref === undefined) {
+  const branch = target ?? pr?.baseRefName ?? (await defaultBranchName($))
+  if (branch === undefined) {
     $.ui.toast(`No base branch found for pull request #${number}`)
+    return
+  }
+  // The base as origin has it now; when that fails, as this clone has it.
+  const baseCopy = `refs/file-explorer/base/${branch}`
+  const isFresh = (await fetchRef($, `+refs/heads/${branch}:${baseCopy}`)).exitCode === 0
+  const ref = isFresh ? await mergeBaseWith($, baseCopy, head) : await mergeBaseWith($, branch, head)
+  if (ref === undefined) {
+    $.ui.toast(`No fork point with ${branch} for pull request #${number}`)
     return
   }
   const label = pr === undefined ? `PR #${number}` : pullLabel(pr)
@@ -437,15 +478,27 @@ async function chooseBase($: EngineInterface, typed: string) {
     $.ui.toast(`Not a ref: ${oneLine(name)}`)
     return
   }
-  // `pr`: this branch's pull request; `pr 123` or `#123`: that one.
-  const pull = /^(?:pr|pull)(?:\s+#?(\d+))?$|^#(\d+)$/i.exec(name)
+  // `pr`: this branch's pull request; `pr 123` or `#123`: that one. A
+  // branch after either is the base to compare with (`pr 123 develop`).
+  const pull = /^(?:(?:pr|pull)(?:\s+#?(\d+))?|#(\d+))(?:\s+(\S+))?$/i.exec(name)
   if (pull !== null) {
     const number = Number(pull[1] ?? pull[2] ?? 0)
-    if (number > 0) return openPull($, number)
-    const pr = await branchPullBase($)
+    const target = pull[3]
+    if (target !== undefined && !isPlainBranch(target)) {
+      $.ui.toast(`Not a branch: ${oneLine(target)}`)
+      return
+    }
+    if (number > 0) return openPull($, number, target)
+    const pr = await branchPullBase($, target)
     if (pr !== undefined) return setBase($, pr)
     const branch = await defaultBranchBase($)
-    $.ui.toast(branch === undefined ? 'No pull request for this branch (gh shows them)' : 'No pull request found (needs gh); showing the default branch')
+    $.ui.toast(
+      target !== undefined
+        ? `No fork point with ${target}`
+        : branch === undefined
+          ? 'No pull request found for this branch'
+          : 'No pull request found (gh, or a public GitHub repository); showing the default branch',
+    )
     if (branch !== undefined) await setBase($, branch)
     return
   }
@@ -2320,7 +2373,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'changes',
       description: 'Browse git changes against a ref or a range (HEAD by default)',
-      argumentHint: '[ref | a..b | turn | pr [number]]',
+      argumentHint: '[ref | a..b | turn | pr [number] [base]]',
     })
     if ((await read($, root)) !== e.cwd) {
       await update($, root, () => e.cwd)
