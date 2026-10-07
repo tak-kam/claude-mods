@@ -83,6 +83,7 @@ const pins = atom({ plugin: 'file-explorer', key: 'pins' } as const, [])
 const historyOf = atom({ plugin: 'file-explorer', key: 'historyOf' } as const, '')
 const fileHistory = atom({ plugin: 'file-explorer', key: 'fileHistory' } as const, [])
 const blame = atom({ plugin: 'file-explorer', key: 'blame' } as const, null)
+const prDiffBase = atom({ plugin: 'file-explorer', key: 'prDiffBase' } as const, null)
 const diagrams = atom({ plugin: 'file-explorer', key: 'diagrams' } as const, {})
 const pictures = atom({ plugin: 'file-explorer', key: 'pictures' } as const, {})
 const converters = atom({ plugin: 'file-explorer', key: 'converters' } as const, null)
@@ -291,13 +292,42 @@ async function diffOf($: EngineInterface, change: ExplorerChange): Promise<{ dif
           ...(change.from === undefined ? [] : [change.from]),
           change.path,
         ])
+  return shapeDiff(result, change.from === undefined ? '' : `renamed from ${change.from}`)
+}
+
+// git's diff of one file as the preview shows it: from its first hunk,
+// cleaned, cut to fit; or a note saying why there is none.
+function shapeDiff(result: { exitCode: number; stdout: string }, renamed: string): { diff: string; note: string } {
   if (result.exitCode !== 0 && result.exitCode !== 1) return { diff: '', note: 'git diff failed' }
   if (/^Binary files /m.test(result.stdout)) return { diff: '', note: 'binary file changed' }
-  const renamed = change.from === undefined ? '' : `renamed from ${change.from}`
   const at = result.stdout.indexOf('@@ ')
   if (at < 0) return { diff: '', note: renamed || 'no textual change' }
   const { text, isCut } = clipDiff(cleanText(result.stdout.slice(at)), MAX_CODE_CHARS)
   return { diff: text, note: [renamed, isCut ? 'diff cut to fit' : ''].filter(Boolean).join(' · ') }
+}
+
+// The PR Button's base: this branch's pull request, else the default
+// branch's merge-base; found when first pressed, kept until a refresh.
+async function findPrDiffBase($: EngineInterface): Promise<{ ref: string; label: string } | undefined> {
+  const kept = await read($, prDiffBase)
+  if (kept !== null) return kept
+  const found = (await branchPullBase($)) ?? (await defaultBranchBase($))
+  if (found === undefined) return undefined
+  const value = { ref: found.ref, label: found.label }
+  await update($, prDiffBase, () => value)
+  return value
+}
+
+// One file against that base, as it is in the working tree; a file git does
+// not track yet is new against any base.
+async function prDiffOf($: EngineInterface, ref: string, rel: string): Promise<{ diff: string; note: string }> {
+  const tracked = await git($, ['ls-files', '--error-unmatch', '--', rel])
+  const result =
+    tracked.exitCode === 0 || !(await $.fs.exists(join(await read($, root), rel)).catch(() => false))
+      ? await git($, ['diff', '--no-ext-diff', '--no-textconv', '--relative', '--no-color', '-M', ref, '--', rel])
+      : await git($, ['diff', '--no-ext-diff', '--no-textconv', '--no-index', '--no-color', '--', '/dev/null', rel])
+  const shaped = shapeDiff(result, '')
+  return shaped.diff === '' && shaped.note === 'no textual change' ? { diff: '', note: 'unchanged in this pull request' } : shaped
 }
 
 async function setBase($: EngineInterface, next: ExplorerBase) {
@@ -992,8 +1022,9 @@ const isMarkdown = (rel: string) => /\.(md|mdx|markdown)$/i.test(rel)
 const isData = (rel: string) => isDelimited(rel) || isJson(rel)
 const fileMode = (rel: string): ExplorerMode => (isMarkdown(rel) ? 'rendered' : isData(rel) ? 'data' : 'file')
 
-async function showPath($: EngineInterface, rel: string, options: { mode?: ExplorerMode; size?: number } = {}) {
+async function showPath($: EngineInterface, rel: string, options: { mode?: ExplorerMode; size?: number; against?: 'pr' } = {}) {
   await update($, selected, () => rel)
+  if (options.against === 'pr') return showPrDiff($, rel)
   const change = (await read($, changes)).find(one => one.path === rel)
   const now = await read($, base)
   const isInRange = change !== undefined && now.head !== undefined && now.kind !== 'turn'
@@ -1035,6 +1066,39 @@ async function showPath($: EngineInterface, rel: string, options: { mode?: Explo
   if (!layout.isSplit) await $.ui.open({ id: PREVIEW, title: baseName(rel) })
 }
 
+// The PR Button: the file against this branch's pull request (or the
+// default branch's merge-base), whatever the Changes base is.
+async function showPrDiff($: EngineInterface, rel: string) {
+  const against = await findPrDiffBase($)
+  if (against === undefined) {
+    $.ui.toast('No pull request or default branch to compare with')
+    return
+  }
+  const file = await fileText($, rel)
+  const diff = await prDiffOf($, against.ref, rel)
+  const change = (await read($, changes)).find(one => one.path === rel)
+  const shown: ExplorerPreview = {
+    path: rel,
+    mode: 'diff',
+    text: file.text,
+    diff: diff.diff,
+    note: diff.note,
+    isChanged: change !== undefined,
+    isOnDisk: file.isOnDisk,
+    size: (file as { size?: number }).size,
+    mtimeMs: (file as { mtimeMs?: number }).mtimeMs,
+    diffAgainst: against.label,
+  }
+  const before = await read($, preview)
+  if (before === null || before.path !== rel || before.diffAgainst === undefined) {
+    await update($, previewOffset, () => 0)
+    await update($, sideways, () => 0)
+  }
+  await update($, preview, () => shown)
+  await reveal($, rel)
+  if (!layout.isSplit) await $.ui.open({ id: PREVIEW, title: baseName(rel) })
+}
+
 // Scrolls the sidebar so the row of `rel` is in its window.
 async function reveal($: EngineInterface, rel: string) {
   const current = await read($, view)
@@ -1056,7 +1120,7 @@ async function reloadPreview($: EngineInterface) {
   const isSplitOpen = layout.isSplit && (await $.ui.panes()).some(pane => pane.id === EXPLORER)
   if (isOpen || isSplitOpen) {
     const offset = await read($, previewOffset)
-    await showPath($, shown.path, { mode: shown.mode })
+    await showPath($, shown.path, shown.diffAgainst === undefined ? { mode: shown.mode } : { against: 'pr' })
     await update($, previewOffset, () => offset)
     const blamed = await read($, blame)
     const now = await read($, preview)
@@ -1187,6 +1251,8 @@ async function refreshAll($: EngineInterface) {
   // A newly installed mmdc is found, and failed diagrams are tried again.
   await update($, mermaidTool, () => 'unknown')
   await update($, converters, () => null)
+  // This branch's pull request may have come, gone or moved.
+  await update($, prDiffBase, () => null)
   await update($, pictures, all => Object.fromEntries(Object.entries(all).filter(([, one]) => one.status === 'ok')))
   await update($, diagrams, all => Object.fromEntries(Object.entries(all).filter(([, one]) => one.status === 'ok')))
   const narrowed = await read($, historyOf)
@@ -1907,8 +1973,15 @@ async function drawPreview(
   }
   if (shown.isChanged) {
     tools.push(tool('mode:diff', 'Diff', 'd', () => (
-      <Button key="mode:diff" label="Diff" plain hotkey="d" dimColor={shown.mode === 'diff' ? undefined : true}
+      <Button key="mode:diff" label="Diff" plain hotkey="d" dimColor={shown.mode === 'diff' && shown.diffAgainst === undefined ? undefined : true}
         onPress={() => showPath($, shown.path, { mode: 'diff' })} />
+    )))
+  }
+  // The file against this branch's pull request, beside File and Diff.
+  if (shown.isHelp !== true && (await read($, gitError)) !== 'Not a git repository') {
+    tools.push(tool('mode:pr', 'PR', 'v', () => (
+      <Button key="mode:pr" label="PR" plain hotkey="v" dimColor={shown.diffAgainst === undefined ? true : undefined}
+        onPress={() => showPath($, shown.path, { against: 'pr' })} />
     )))
   }
   // Always drawn, dim when there is nowhere to go, so the toolbar's
@@ -2289,7 +2362,7 @@ async function drawPreview(
             label="❝ quote"
             plain
             dimColor
-            onPress={() => quote($, hunk.body, `\`${shown.path}\` ${hunk.lines} (diff ${verb} ${against.label})`, 'diff')}
+            onPress={() => quote($, hunk.body, `\`${shown.path}\` ${hunk.lines} (diff ${shown.diffAgainst === undefined ? `${verb} ${against.label}` : `vs ${shown.diffAgainst}`})`, 'diff')}
           />
         </Box>,
       )
@@ -2324,7 +2397,9 @@ async function drawPreview(
           {change !== undefined && <Text color={BADGE_COLOR[change.letter] ?? 'yellow'}>{change.letter}</Text>}
           {fit(
             [
-              change !== undefined ? ` ${verb} ${against.label} · ${at + 1}/${list.length}` : '',
+              shown.diffAgainst !== undefined
+                ? ` vs ${shown.diffAgainst}`
+                : change !== undefined ? ` ${verb} ${against.label} · ${at + 1}/${list.length}` : '',
               total > 0 ? `${change !== undefined ? ' ·' : ''} ${shown.mode === 'diff' || shown.mode === 'data' ? 'rows' : 'lines'} ${offset + 1}-${shownEnd}/${total}` : '',
               shown.size !== undefined ? ` · ${formatSize(shown.size)}${ageText === '' ? '' : ` · ${ageText} ago`}` : '',
             ].join(''),

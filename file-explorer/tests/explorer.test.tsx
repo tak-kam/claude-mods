@@ -1683,3 +1683,65 @@ test("shows this branch's pull request and fetches another by number", async ($,
   expect((await ui.find({ key: 'base' }))?.props.label).toBe('#41 Login (vs release)')
   expect(runs.filter(run => run.argv.includes('--name-status')).at(-1)?.argv).toContain('forkR')
 })
+
+test('the PR button shows the open file against this branch’s pull request, whatever the Changes base', async ($, on) => {
+  const runs: string[][] = []
+  let hasPr = true
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('fs.stat', async (_$, e) => STAT(e.path))
+  on('fs.exists', async () => ({ value: true }))
+  on('fs.list', async (_$, e) => ({ value: (TREE[e.path] ?? []).map(one => ({ ...one, mtimeMs: 0, isLink: false })) }))
+  on('fs.read', async () => ({ value: 'export {}\n' }))
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+  on('ui.panes', async () => ({ value: [] }))
+  on('ui.toast', async () => ({ value: undefined }))
+  on('http.fetch', async () => ({ value: { status: 404, ok: false, headers: {}, text: '{}' } }))
+  on('process.run', async (_$, e) => {
+    runs.push([...e.argv])
+    if (e.argv[0] === 'gh') {
+      if (!hasPr) return ok('no pull requests found', 1)
+      return ok(JSON.stringify({ number: 41, title: 'Login', baseRefName: 'develop', headRefOid: 'a'.repeat(40) }))
+    }
+    const line = gitArgs(e.argv).join(' ')
+    if (line === 'merge-base origin/develop HEAD') return ok('forkpoint\n')
+    if (line === 'merge-base HEAD origin/main' || line === 'merge-base origin/main HEAD') return ok('mainfork\n')
+    if (line === 'ls-files --error-unmatch -- README.md') return ok('README.md\n')
+    if (line === 'ls-files --error-unmatch -- src/util.ts') return ok('', 1)
+    if (line === 'diff --relative --no-color -M forkpoint -- README.md') return ok('diff --git a/README.md b/README.md\n@@ -1 +1 @@\n-old\n+new\n')
+    if (line === 'diff --relative --no-color -M mainfork -- README.md') return ok('')
+    return fakeGit(e.argv, [])
+  })
+
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE('file-explorer', 120))
+  await ui.press({ key: 'row:README.md' })
+
+  // Beside File and Diff, dim until pressed.
+  expect((await ui.find({ key: 'mode:pr' }))?.props.dimColor).toBe(true)
+  await ui.press({ key: 'mode:pr' })
+  const code = await ui.find({ type: 'Code' })
+  expect(code?.props.format).toBe('diff')
+  expect(String(code?.props.source)).toContain('+new')
+  expect((await ui.find({ key: 'mode:pr' }))?.props.dimColor).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /vs #41 Login \(vs develop\)/ })).toBeDefined()
+  // The Changes base is left as it was.
+  await ui.press({ key: 'tab:changes' })
+  expect((await ui.find({ key: 'base' }))?.props.label).toBe('HEAD')
+  // The base is asked for once, not on every file.
+  await ui.press({ key: 'tab:files' })
+  await ui.press({ key: 'row:src' })
+  await ui.press({ key: 'row:src/util.ts' })
+  await ui.press({ key: 'mode:pr' })
+  expect(runs.filter(argv => argv[0] === 'gh')).toHaveLength(1)
+  // A file git does not track is new in the pull request.
+  expect(runs.some(argv => argv.includes('--no-index') && argv.at(-1) === 'src/util.ts')).toBe(true)
+
+  // Without a pull request, after a refresh: the default branch, and an unchanged file says so.
+  hasPr = false
+  await ui.press({ key: 'refresh' })
+  await ui.press({ key: 'row:README.md' })
+  await ui.press({ key: 'mode:pr' })
+  expect(await ui.find({ type: 'Text', text: /vs origin\/main \(merge-base\)/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'unchanged in this pull request' })).toBeDefined()
+})
