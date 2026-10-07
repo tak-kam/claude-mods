@@ -432,9 +432,9 @@ async function openPull($: EngineInterface, number: number, target?: string) {
     return
   }
   // The base as origin has it now; when that fails, as this clone has it.
-  const baseRef = `refs/file-explorer/base/${branch}`
-  const isFresh = (await fetchRef($, `+refs/heads/${branch}:${baseRef}`)).exitCode === 0
-  const ref = isFresh ? await mergeBaseWith($, baseRef, head) : await mergeBaseWith($, branch, head)
+  const baseCopy = `refs/file-explorer/base/${branch}`
+  const isFresh = (await fetchRef($, `+refs/heads/${branch}:${baseCopy}`)).exitCode === 0
+  const ref = isFresh ? await mergeBaseWith($, baseCopy, head) : await mergeBaseWith($, branch, head)
   if (ref === undefined) {
     $.ui.toast(`No fork point with ${branch} for pull request #${number}`)
     return
