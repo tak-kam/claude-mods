@@ -28,7 +28,9 @@ export type ExplorerBase = {
   ref: string
   label: string
   head?: string
-  kind?: 'turn'
+  // `pr`: a pull request (this branch's, or one fetched by number);
+  // `branch`: the default branch's merge-base.
+  kind?: 'turn' | 'pr' | 'branch'
 }
 
 export type ExplorerCommit = {

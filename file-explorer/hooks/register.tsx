@@ -16,7 +16,7 @@ import type {
 import { iconFor, iconWidth } from './icons'
 import { compileQuery, excerpt, fuzzyFilter, fuzzyIndex, matchSpan, parseGrep } from './search'
 import { cellWidth, fitCells, localLinks, markdownWindow, resolveLink, splitMarkdown } from './markdown'
-import { clipDiff, hunkOffset, parseBlame, parseFileLog, parseLog, parseNameStatus, sliceHunk, splitHunks, UNCOMMITTED } from './diff'
+import { clipDiff, hunkOffset, isPlainBranch, parseBlame, parseFileLog, parseLog, parseNameStatus, parsePullRequest, pullLabel, sliceHunk, splitHunks, UNCOMMITTED } from './diff'
 import { cleanText, isPlainRelative, oneLine } from './safe'
 import { helpText } from './help'
 import { formatAge, formatSize, isIgnored, parseIgnored } from './details'
@@ -310,22 +310,106 @@ async function defaultBranchBase($: EngineInterface): Promise<ExplorerBase | und
   const candidates = [remote.stdout.trim(), 'origin/main', 'origin/master', 'main', 'master'].filter(Boolean)
   for (const name of candidates) {
     const merge = await git($, ['merge-base', 'HEAD', name])
-    if (merge.exitCode === 0) return { ref: merge.stdout.trim(), label: `${name} (merge-base)` }
+    if (merge.exitCode === 0) return { ref: merge.stdout.trim(), label: `${name} (merge-base)`, kind: 'branch' }
   }
   return undefined
 }
 
-// HEAD → the last prompt → the default branch's merge-base → HEAD.
+// HEAD → the last prompt → this branch's pull request → the default
+// branch's merge-base → HEAD; a step with nothing to show is skipped.
 async function cycleBase($: EngineInterface) {
   const now = await read($, base)
+  const isHead = now.ref === 'HEAD' && now.head === undefined
   const turn = await read($, lastPrompt)
-  if (now.ref === 'HEAD' && now.head === undefined && turn !== null) return setBase($, turn)
-  if (now.kind === 'turn' || (now.ref === 'HEAD' && now.head === undefined)) {
+  if (isHead && turn !== null) return setBase($, turn)
+  if (isHead || now.kind === 'turn') {
+    const pr = await branchPullBase($)
+    if (pr !== undefined) return setBase($, pr)
+  }
+  if (isHead || now.kind === 'turn' || (now.kind === 'pr' && now.head === undefined)) {
     const branch = await defaultBranchBase($)
     if (branch !== undefined) return setBase($, branch)
-    if (now.kind !== 'turn') $.ui.toast('No main or master branch to compare with')
+    if (isHead) $.ui.toast('No main or master branch to compare with')
   }
   await setBase($, HEAD)
+}
+
+// ---- pull requests --------------------------------------------------------
+
+// gh, when the person has it: what a pull request merges into, its number
+// and title. Never asked to log in or to choose (no prompts), never long.
+async function ghPull($: EngineInterface, which: string[]) {
+  const cwd = await read($, root)
+  const ran = await $.process
+    .run(['gh', 'pr', 'view', ...which, '--json', 'number,title,baseRefName,headRefOid'], {
+      cwd,
+      timeoutMs: 15000,
+      env: { GH_PROMPT_DISABLED: '1', GH_NO_UPDATE_NOTIFIER: '1' },
+    })
+    .catch(() => undefined)
+  return ran !== undefined && ran.exitCode === 0 ? parsePullRequest(ran.stdout) : undefined
+}
+
+// The merge-base of `head` with a branch, as the remote has it if it can.
+async function mergeBaseWith($: EngineInterface, branch: string, head: string): Promise<string | undefined> {
+  for (const name of [`origin/${branch}`, branch]) {
+    const merge = await git($, ['merge-base', name, head])
+    if (merge.exitCode === 0) return merge.stdout.trim()
+  }
+  return undefined
+}
+
+// This branch's pull request, as GitHub shows it: from where the branch
+// left its base to the working tree (uncommitted work included).
+async function branchPullBase($: EngineInterface): Promise<ExplorerBase | undefined> {
+  const pr = await ghPull($, [])
+  if (pr === undefined) return undefined
+  const ref = await mergeBaseWith($, pr.baseRefName, 'HEAD')
+  return ref === undefined ? undefined : { ref, label: `${pullLabel(pr)} (vs ${pr.baseRefName})`, kind: 'pr' }
+}
+
+// Remote-supplied config could name a program for a transport; a fetch the
+// explorer runs allows none, never prompts, and gives up in a minute.
+const FETCH_SAFETY = ['-c', 'protocol.ext.allow=never', '-c', 'protocol.file.allow=never', '-c', 'core.fsmonitor=false']
+
+// Another pull request, by number: its head fetched from origin (GitHub's
+// `pull/N/head`) into a ref of the explorer's own, and shown from where it
+// left its base to that head. Only when asked: this goes to the network.
+async function openPull($: EngineInterface, number: number) {
+  const pr = await ghPull($, [String(number)])
+  const cwd = await read($, root)
+  const local = `refs/file-explorer/pull/${number}`
+  $.ui.toast(`Fetching pull request #${number}…`)
+  const fetched = await $.process
+    .run(['git', ...FETCH_SAFETY, 'fetch', '--no-tags', '--no-write-fetch-head', 'origin', `+refs/pull/${number}/head:${local}`], {
+      cwd,
+      timeoutMs: 60000,
+      env: { GIT_TERMINAL_PROMPT: '0' },
+    })
+    .catch(() => ({ exitCode: -1, stdout: '', stderr: 'git could not run' }))
+  const head = fetched.exitCode === 0 ? await resolveCommit($, local) : undefined
+  if (head === undefined) {
+    $.ui.toast(`Could not fetch pull request #${number}: ${oneLine(fetched.stderr.trim().split('\n').pop() ?? '')}`)
+    return
+  }
+  const branch = pr?.baseRefName ?? (await defaultBranchName($))
+  const ref = branch === undefined ? undefined : await mergeBaseWith($, branch, head)
+  if (ref === undefined) {
+    $.ui.toast(`No base branch found for pull request #${number}`)
+    return
+  }
+  const label = pr === undefined ? `PR #${number}` : pullLabel(pr)
+  await setBase($, { ref, head, label: `${label} (vs ${branch})`, kind: 'pr' })
+}
+
+// The default branch's name, as origin/HEAD, main or master.
+async function defaultBranchName($: EngineInterface): Promise<string | undefined> {
+  const remote = await git($, ['symbolic-ref', '--short', '-q', 'refs/remotes/origin/HEAD'])
+  const named = remote.stdout.trim().replace(/^origin\//, '')
+  for (const name of [named, 'main', 'master'].filter(isPlainBranch)) {
+    if ((await resolveCommit($, `origin/${name}`)) !== undefined || (await resolveCommit($, name)) !== undefined) return name
+  }
+  return undefined
 }
 
 // Taken as each prompt is sent, so the changes a turn made can be shown alone.
@@ -351,6 +435,18 @@ async function chooseBase($: EngineInterface, typed: string) {
   // A ref is never an option: refuse what git would read as one.
   if (name.split(/\.\.\.?/).some(part => part.startsWith('-'))) {
     $.ui.toast(`Not a ref: ${oneLine(name)}`)
+    return
+  }
+  // `pr`: this branch's pull request; `pr 123` or `#123`: that one.
+  const pull = /^(?:pr|pull)(?:\s+#?(\d+))?$|^#(\d+)$/i.exec(name)
+  if (pull !== null) {
+    const number = Number(pull[1] ?? pull[2] ?? 0)
+    if (number > 0) return openPull($, number)
+    const pr = await branchPullBase($)
+    if (pr !== undefined) return setBase($, pr)
+    const branch = await defaultBranchBase($)
+    $.ui.toast(branch === undefined ? 'No pull request for this branch (gh shows them)' : 'No pull request found (needs gh); showing the default branch')
+    if (branch !== undefined) await setBase($, branch)
     return
   }
   if (name === 'turn' || name === 'prompt') {
@@ -2224,7 +2320,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'changes',
       description: 'Browse git changes against a ref or a range (HEAD by default)',
-      argumentHint: '[ref | a..b | turn]',
+      argumentHint: '[ref | a..b | turn | pr [number]]',
     })
     if ((await read($, root)) !== e.cwd) {
       await update($, root, () => e.cwd)

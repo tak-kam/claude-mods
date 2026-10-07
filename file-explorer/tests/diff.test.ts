@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { clipDiff, hunkOffset, letterOf, parseLog, parseNameStatus, sliceHunk, splitHunks, parseBlame, parseFileLog, UNCOMMITTED } from '../hooks/diff'
+import { clipDiff, hunkOffset, letterOf, parseLog, parseNameStatus, sliceHunk, splitHunks, parseBlame, parseFileLog, UNCOMMITTED, isPlainBranch, parsePullRequest, pullLabel } from '../hooks/diff'
 
 describe('letterOf', () => {
   test('maps git status codes to the letters drawn', () => {
@@ -183,5 +183,27 @@ describe('parseBlame', () => {
 
   test('stops at the line limit', () => {
     expect(parseBlame(raw, 2).shas).toEqual([C, C])
+  })
+})
+
+describe('pull requests', () => {
+  test('parses what gh says, and only that', () => {
+    const sha = 'c'.repeat(40)
+    expect(parsePullRequest(JSON.stringify({ number: 12, title: 'Add x\nnow', baseRefName: 'release/1.2', headRefOid: sha }))).toEqual({
+      number: 12, title: 'Add x?now', baseRefName: 'release/1.2', headRefOid: sha,
+    })
+    expect(parsePullRequest('not json')).toBeUndefined()
+    expect(parsePullRequest(JSON.stringify({ number: 0, baseRefName: 'main' }))).toBeUndefined()
+    expect(parsePullRequest(JSON.stringify({ number: 3, baseRefName: '--upload-pack=x' }))).toBeUndefined()
+    expect(parsePullRequest(JSON.stringify({ number: 3, baseRefName: 'main', headRefOid: 'nope' }))).toEqual({ number: 3, title: '', baseRefName: 'main' })
+  })
+
+  test('branch names and labels', () => {
+    expect(isPlainBranch('feature/x-1')).toBe(true)
+    expect(isPlainBranch('-x')).toBe(false)
+    expect(isPlainBranch('a..b')).toBe(false)
+    expect(isPlainBranch('a b')).toBe(false)
+    expect(pullLabel({ number: 5, title: '' })).toBe('PR #5')
+    expect(pullLabel({ number: 5, title: 'Fix' })).toBe('#5 Fix')
   })
 })
