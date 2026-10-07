@@ -28,6 +28,7 @@ In **Changes**, press the base (\`vs HEAD\`) to cycle HEAD, the last prompt, thi
 | \`j\` \`k\` | Scroll down, up (the wheel too) |
 | \`n\` \`p\` | Next, previous changed file |
 | \`o\` \`d\` \`m\` | Source, diff, and the readable view: markdown preview, CSV/TSV table, JSON tree |
+| \`v\` | The file against this branch's pull request (else the default branch), whatever the Changes base |
 | \`w\` | Wrap long lines, or cut them at the edge |
 | \`◀\` \`▶\` | Scroll sideways, with wrapping off (click) |
 | \`q\` | Quote the mouse selection into the prompt |
@@ -99,6 +100,7 @@ export const HELP_JA = `# キーとコマンド
 | \`j\` \`k\` | 下・上にスクロール（ホイールでも可） |
 | \`n\` \`p\` | 次・前の変更ファイル |
 | \`o\` \`d\` \`m\` | ソース、diff、読みやすい表示（Markdown プレビュー、CSV/TSV の表、JSON のツリー） |
+| \`v\` | このブランチの PR（無ければ既定ブランチ）と比べたファイルの差分。Changes の基準とは別に見られる |
 | \`w\` | 長い行を折り返す・画面端で切る |
 | \`◀\` \`▶\` | 横スクロール（折り返しオフのとき、クリック） |
 | \`q\` | マウスで選択した範囲をプロンプトに引用 |

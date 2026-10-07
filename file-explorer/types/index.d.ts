@@ -61,6 +61,9 @@ export type ExplorerPreview = {
   // A picture: its format and size in pixels (0 when the header did not
   // say), and the real path inside the project the terminal reads it from.
   image?: { format: 'png' | 'jpeg' | 'gif' | 'webp'; width: number; height: number; file: string }
+  // Set when `diff` is the file against this branch's pull request (the
+  // PR Button), not against the Changes base: what it is against.
+  diffAgainst?: string
 }
 
 export type ExplorerDiagram = {
@@ -105,6 +108,8 @@ declare module 'claude-code' {
       // Mermaid blocks drawn by the person's mmdc, by diagramKey; whether
       // mmdc answered at all.
       diagrams: Record<string, ExplorerDiagram>
+      // The PR Button's base, found once (again after a refresh).
+      prDiffBase: { ref: string; label: string } | null
       mermaidTool: 'unknown' | 'yes' | 'no'
       // JPEG/GIF/WebP and SVG converted to PNG for the terminal, by a key of
       // path, time and size; the converters found (null: not looked yet).

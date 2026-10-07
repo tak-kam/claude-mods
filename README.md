@@ -82,6 +82,7 @@ For Claude Code running inside [herdr](https://github.com/herdrdev/herdr), the t
 - `l` lists the open file's own history in the History tab (renames followed; a commit opens its diff of the file), and `a` shows blame beside the source: who last changed each run of lines and when, the commit id a press away. Blame runs only when asked
 - PNG files are drawn in the preview in terminals that show pictures (kitty, Ghostty). JPEG/GIF/WebP are converted to PNG and drawn too when you have a converter (macOS's built-in `sips`, `ffmpeg`, or ImageMagick, in that order), and SVG is drawn above its source with `rsvg-convert`; the explorer never installs one, and without one the preview names the format and pixel size. SVG is drawn as-is in the desktop and VS Code apps. The `pictures` option in `/config` set to `off` never runs a converter
 - A wide tree shows each file's size and age; files git ignores are drawn dim, and `g` (`⊘`) hides or shows them. The preview's status line names the open file's size and age too
+- **PR** (`v`) beside File and Diff in the preview shows the open file against this branch's pull request (or, without one, the default branch's merge-base), whatever the Changes base is; the base is found once and again after `↻`
 - Preview: `o` / `d` file or diff, `j` / `k` scroll, `n` / `p` next or previous change, `q` quotes the mouse selection, `❝ quote` quotes a hunk, `@` inserts `@path`
 
 Opened at start, the pane docks beside the transcript in fullscreen mode at 144 columns or wider; `/files` opens it at any width.
