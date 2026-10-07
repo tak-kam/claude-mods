@@ -1575,3 +1575,75 @@ test('with pictures off, never runs a converter', { options: { pictures: 'off' }
   expect(runs).toEqual([])
   expect(await ui.find({ type: 'Image' })).toBeUndefined()
 })
+
+test("shows this branch's pull request and fetches another by number", async ($, on) => {
+  const runs: { argv: string[]; env?: Record<string, string> }[] = []
+  const toasts: string[] = []
+  let hasGh = true
+  on('session.start', async (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', async (_$, e) => ({ value: { command: e.name } }))
+  on('fs.stat', async (_$, e) => STAT(e.path))
+  on('fs.list', async (_$, e) => ({ value: (TREE[e.path] ?? []).map(one => ({ ...one, mtimeMs: 0, isLink: false })) }))
+  on('fs.read', async () => ({ value: 'export {}\n' }))
+  on('ui.open', async () => ({ value: { isPlaced: true as const } }))
+  on('ui.panes', async () => ({ value: [] }))
+  on('ui.toast', async (_$, e) => {
+    toasts.push(String((e as { text?: unknown }).text ?? e))
+    return { value: undefined }
+  })
+  on('process.run', async (_$, e) => {
+    runs.push({ argv: [...e.argv], env: e.init?.env })
+    if (e.argv[0] === 'gh') {
+      if (!hasGh) throw new Error('ENOENT')
+      const which = e.argv[3] === '--json' ? '' : e.argv[3]
+      if (which === '') return ok(JSON.stringify({ number: 41, title: 'herdr-bridge\u001b[2J', baseRefName: 'main', headRefOid: 'a'.repeat(40) }))
+      if (which === '7') return ok(JSON.stringify({ number: 7, title: 'Fix login', baseRefName: 'develop', headRefOid: 'b'.repeat(40) }))
+      return ok('', 1)
+    }
+    const line = gitArgs(e.argv).join(' ')
+    if (line.startsWith('fetch ')) return ok('')
+    if (line === 'rev-parse --verify -q refs/file-explorer/pull/7^{commit}') return ok('pr7head\n')
+    if (line === 'merge-base origin/main HEAD' || line === 'merge-base HEAD origin/main') return ok('forkpoint\n')
+    if (line === 'merge-base origin/develop pr7head') return ok('base7\n')
+    if (line.startsWith('diff --relative --name-status') && e.argv.includes('pr7head')) return ok('A\0src/login.ts\0')
+    return fakeGit(e.argv, [])
+  })
+
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(PANE('file-explorer', 120))
+  await ui.press({ key: 'tab:changes' })
+
+  // The base cycles HEAD → this branch's PR (from its fork point) → the default branch → HEAD.
+  await ui.press({ key: 'base' })
+  expect((await ui.find({ key: 'base' }))?.props.label).toBe('#41 herdr-bridge?[2J (vs main)')
+  const diffs = runs.filter(run => run.argv.includes('--name-status'))
+  expect(diffs.at(-1)?.argv).toContain('forkpoint')
+  const view = runs.find(run => run.argv[0] === 'gh')
+  expect(view?.argv).toEqual(['gh', 'pr', 'view', '--json', 'number,title,baseRefName,headRefOid'])
+  expect(view?.env?.GH_PROMPT_DISABLED).toBe('1')
+  await ui.press({ key: 'base' })
+  expect(String((await ui.find({ key: 'base' }))?.props.label)).toContain('(merge-base)')
+  await ui.press({ key: 'base' })
+  expect((await ui.find({ key: 'base' }))?.props.label).toBe('HEAD')
+
+  // Another PR by number: fetched into the explorer's own ref, safely, and shown from its fork point.
+  await $.command.run({ command: 'changes', args: 'pr 7' } as never)
+  const fetch = runs.find(run => run.argv.includes('fetch'))
+  expect(fetch?.argv).toContain('protocol.ext.allow=never')
+  expect(fetch?.argv).toContain('+refs/pull/7/head:refs/file-explorer/pull/7')
+  expect(fetch?.env?.GIT_TERMINAL_PROMPT).toBe('0')
+  expect((await ui.find({ key: 'base' }))?.props.label).toBe('#7 Fix login (vs develop)')
+  expect(await ui.find({ key: 'change:src/login.ts' })).toBeDefined()
+  expect(runs.filter(run => run.argv.includes('--name-status')).at(-1)?.argv.slice(-2)).toEqual(['base7', 'pr7head'])
+
+  // `#7` is the same; a number that is not one is a ref, and never fetched.
+  const fetches = runs.filter(run => run.argv.includes('fetch')).length
+  await $.command.run({ command: 'changes', args: 'pr -1' } as never)
+  expect(runs.filter(run => run.argv.includes('fetch')).length).toBe(fetches)
+
+  // Without gh: no PR to find, so the default branch, and said so.
+  hasGh = false
+  await $.command.run({ command: 'changes', args: 'pr' } as never)
+  expect(String((await ui.find({ key: 'base' }))?.props.label)).toContain('(merge-base)')
+  expect(toasts.some(text => text.includes('needs gh'))).toBe(true)
+})

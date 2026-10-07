@@ -178,3 +178,36 @@ export function parseBlame(raw: string, limit: number): { commits: Record<string
 }
 
 export const UNCOMMITTED = '0'.repeat(40)
+
+export type PullRequest = { number: number; title: string; baseRefName: string; headRefOid?: string }
+
+// A branch name git can take as is: no option, no range, no oddities.
+export function isPlainBranch(name: string): boolean {
+  return /^[A-Za-z0-9._/-]+$/.test(name) && !name.startsWith('-') && !name.includes('..') && !name.endsWith('/') && !name.endsWith('.lock')
+}
+
+// `gh pr view --json number,title,baseRefName,headRefOid`: what the explorer
+// needs of a pull request, or nothing when gh said something else.
+export function parsePullRequest(stdout: string): PullRequest | undefined {
+  let data: unknown
+  try {
+    data = JSON.parse(stdout)
+  } catch {
+    return undefined
+  }
+  const pr = data as { number?: unknown; title?: unknown; baseRefName?: unknown; headRefOid?: unknown }
+  if (typeof pr.number !== 'number' || !Number.isInteger(pr.number) || pr.number <= 0) return undefined
+  if (typeof pr.baseRefName !== 'string' || !isPlainBranch(pr.baseRefName)) return undefined
+  const head = typeof pr.headRefOid === 'string' && /^[0-9a-f]{40}$/.test(pr.headRefOid) ? pr.headRefOid : undefined
+  return {
+    number: pr.number,
+    title: oneLine(typeof pr.title === 'string' ? pr.title : ''),
+    baseRefName: pr.baseRefName,
+    ...(head === undefined ? {} : { headRefOid: head }),
+  }
+}
+
+// How a pull request is named in the base Button: `#41 title`.
+export function pullLabel(pr: { number: number; title: string }): string {
+  return pr.title === '' ? `PR #${pr.number}` : `#${pr.number} ${pr.title}`
+}
